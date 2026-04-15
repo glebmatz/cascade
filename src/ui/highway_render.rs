@@ -5,6 +5,15 @@ use crate::game::hit_judge::Judgement;
 
 const LANE_COUNT: usize = 5;
 
+/// Colors for each lane (muted pastels)
+const LANE_COLORS: [(u8, u8, u8); LANE_COUNT] = [
+    (180, 80, 80),    // D — red
+    (80, 160, 80),    // F — green
+    (180, 160, 60),   // _ — yellow
+    (80, 120, 200),   // J — blue
+    (160, 80, 180),   // K — purple
+];
+
 pub struct HighwayWidget<'a> {
     pub notes: &'a [VisibleNote],
     pub lane_labels: [&'a str; LANE_COUNT],
@@ -35,28 +44,20 @@ impl<'a> HighwayWidget<'a> {
         self
     }
 
-    fn lane_x(&self, lane: usize, position: f64, area: Rect) -> u16 {
-        let center_x = area.x as f64 + area.width as f64 / 2.0;
-        let lane_offset = lane as f64 - 2.0;
+    /// Compute left edge X and width for a lane at a given vertical position.
+    /// Slight narrowing at top gives subtle perspective without ugly ASCII walls.
+    fn lane_rect(&self, lane: usize, row: u16, highway_height: u16, area: Rect) -> (u16, u16) {
+        // Perspective factor: 1.0 at bottom, shrinks toward top
+        let t = row as f64 / highway_height.max(1) as f64; // 0=top, 1=bottom
+        let squeeze = 0.7 + 0.3 * t; // 0.7 at top, 1.0 at bottom
 
-        let bottom_spacing = (area.width as f64 / 6.0).max(6.0);
-        let top_spacing = bottom_spacing * 0.25;
+        let total_lane_width = area.width as f64 * squeeze;
+        let lane_w = (total_lane_width / LANE_COUNT as f64).max(3.0);
+        let highway_start = (area.width as f64 - total_lane_width) / 2.0 + area.x as f64;
 
-        let t = position.clamp(0.0, 1.0);
-        let spacing = bottom_spacing + (top_spacing - bottom_spacing) * t;
-        (center_x + lane_offset * spacing) as u16
-    }
-
-    fn note_str(position: f64) -> &'static str {
-        if position > 0.7 { "+" }
-        else if position > 0.4 { "=*=" }
-        else { "=[#]=" }
-    }
-
-    fn note_style(position: f64) -> Style {
-        let t = 1.0 - position.clamp(0.0, 1.0);
-        let brightness = (t * 200.0 + 55.0).min(255.0) as u8;
-        Style::default().fg(Color::Rgb(brightness, brightness, brightness)).bold()
+        let x = (highway_start + lane as f64 * lane_w) as u16;
+        let w = lane_w as u16;
+        (x, w)
     }
 }
 
@@ -66,159 +67,150 @@ impl<'a> Widget for HighwayWidget<'a> {
             return;
         }
 
-        let highway_height = area.height.saturating_sub(3); // room for hit zone + effect row
+        let highway_height = area.height.saturating_sub(3); // hit zone + judgement + 1
 
-        // Draw perspective walls and lane guides
+        // Draw lane backgrounds (subtle colored columns)
         for row in 0..highway_height {
-            let position = 1.0 - (row as f64 / highway_height as f64);
             let y = area.y + row;
+            let t = row as f64 / highway_height as f64; // 0=top, 1=bottom
 
-            let brightness = ((1.0 - position) * 80.0).clamp(12.0, 80.0) as u8;
-            let wall_style = Style::default().fg(Color::Rgb(brightness, brightness, brightness));
-            let dot_brightness = ((1.0 - position) * 40.0).clamp(8.0, 40.0) as u8;
-            let dot_style = Style::default().fg(Color::Rgb(dot_brightness, dot_brightness, dot_brightness));
-
-            // Left wall
-            let left_x = self.lane_x(0, position, area).saturating_sub(3);
-            if left_x >= area.x && left_x < area.x + area.width {
-                buf.set_string(left_x, y, "\\", wall_style);
-            }
-
-            // Right wall
-            let right_x = self.lane_x(4, position, area) + 3;
-            if right_x >= area.x && right_x < area.x + area.width {
-                buf.set_string(right_x, y, "/", wall_style);
-            }
-
-            // Lane center dots
             for lane in 0..LANE_COUNT {
-                let x = self.lane_x(lane, position, area);
-                if x >= area.x && x < area.x + area.width {
-                    buf.set_string(x, y, ".", dot_style);
+                let (lx, lw) = self.lane_rect(lane, row, highway_height, area);
+                let (cr, cg, cb) = LANE_COLORS[lane];
+
+                // Very subtle background: brighter at bottom, dimmer at top
+                let intensity = (t * 0.12 + 0.03) as f32;
+                let bg_r = (cr as f32 * intensity).min(30.0) as u8;
+                let bg_g = (cg as f32 * intensity).min(30.0) as u8;
+                let bg_b = (cb as f32 * intensity).min(30.0) as u8;
+
+                for x in lx..lx + lw {
+                    if x < area.x + area.width {
+                        buf.set_string(x, y, " ", Style::default().bg(Color::Rgb(bg_r, bg_g, bg_b)));
+                    }
+                }
+
+                // Lane separator (right edge)
+                if lx + lw < area.x + area.width {
+                    let sep_b = (t * 30.0 + 10.0) as u8;
+                    buf.set_string(lx + lw, y, " ",
+                        Style::default().bg(Color::Rgb(sep_b, sep_b, sep_b)));
                 }
             }
         }
 
         // Draw hold note trails
         for note in self.notes {
-            if note.duration_ms == 0 { continue; }
-            if note.end_position <= note.position { continue; }
+            if note.duration_ms == 0 || note.end_position <= note.position { continue; }
 
             let start_row = ((1.0 - note.end_position.clamp(0.0, 1.0)) * highway_height as f64) as u16;
             let end_row = ((1.0 - note.position.clamp(0.0, 1.0)) * highway_height as f64) as u16;
+            let (cr, cg, cb) = LANE_COLORS[note.lane as usize % LANE_COUNT];
 
             for row in start_row..=end_row.min(highway_height.saturating_sub(1)) {
                 let y = area.y + row;
-                let pos = 1.0 - (row as f64 / highway_height as f64);
-                let cx = self.lane_x(note.lane as usize, pos, area);
-                if cx >= area.x && cx < area.x + area.width && y >= area.y && y < area.y + area.height {
-                    let brightness = ((1.0 - pos) * 100.0 + 30.0).min(130.0) as u8;
-                    buf.set_string(cx, y, "|", Style::default().fg(Color::Rgb(brightness, brightness, brightness)));
+                let (lx, lw) = self.lane_rect(note.lane as usize, row, highway_height, area);
+                let cx = lx + lw / 2;
+                if cx >= area.x && cx < area.x + area.width && y < area.y + area.height {
+                    let t = row as f64 / highway_height as f64;
+                    let intensity = (t * 0.5 + 0.3) as f32;
+                    let r = (cr as f32 * intensity) as u8;
+                    let g = (cg as f32 * intensity) as u8;
+                    let b = (cb as f32 * intensity) as u8;
+                    buf.set_string(cx, y, "|", Style::default().fg(Color::Rgb(r, g, b)));
                 }
             }
         }
 
-        // Draw note heads
+        // Draw notes
         for note in self.notes {
             if note.position < -0.05 || note.position > 1.0 { continue; }
 
             let row = ((1.0 - note.position) * highway_height as f64) as u16;
             let y = area.y + row.min(highway_height.saturating_sub(1));
-            let cx = self.lane_x(note.lane as usize, note.position, area);
-            let note_str = Self::note_str(note.position);
-            let note_w = note_str.chars().count() as u16;
-            let x = cx.saturating_sub(note_w / 2);
+            let (lx, lw) = self.lane_rect(note.lane as usize, row, highway_height, area);
+            let (cr, cg, cb) = LANE_COLORS[note.lane as usize % LANE_COUNT];
 
-            if x >= area.x && x + note_w < area.x + area.width && y >= area.y && y < area.y + area.height {
-                buf.set_string(x, y, note_str, Self::note_style(note.position));
+            // Note = filled block spanning most of lane width
+            let t = row as f64 / highway_height as f64; // brightness by position
+            let intensity = (t * 0.7 + 0.3) as f32;
+            let r = (cr as f32 * intensity).min(255.0) as u8;
+            let g = (cg as f32 * intensity).min(255.0) as u8;
+            let b = (cb as f32 * intensity).min(255.0) as u8;
+
+            // Note width: narrower at top, wider at bottom
+            let note_w = (lw.saturating_sub(2)).max(1);
+            let note_x = lx + (lw - note_w) / 2;
+
+            for x in note_x..note_x + note_w {
+                if x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height {
+                    buf.set_string(x, y, " ", Style::default().bg(Color::Rgb(r, g, b)));
+                }
             }
         }
 
-        // === HIT ZONE (2 rows) ===
+        // === HIT ZONE ===
         let hit_y = area.y + highway_height;
-        if hit_y + 1 >= area.y + area.height { return; }
+        if hit_y >= area.y + area.height { return; }
 
-        // Row 1: receptor line with lane markers
-        let left_wall = self.lane_x(0, 0.0, area).saturating_sub(4);
-        let right_wall = self.lane_x(4, 0.0, area) + 5;
-
-        // Base line
-        for x in left_wall..right_wall.min(area.x + area.width) {
-            if x >= area.x {
-                buf.set_string(x, hit_y, "-", Style::default().fg(Color::Rgb(35, 35, 35)));
-            }
-        }
-
-        // Lane receptors with flash effect
+        // Draw receptors per lane
         for (i, label) in self.lane_labels.iter().enumerate() {
-            let cx = self.lane_x(i, 0.0, area);
+            let (lx, lw) = self.lane_rect(i, highway_height, highway_height, area);
+            let (cr, cg, cb) = LANE_COLORS[i];
             let flash = self.hit_flash[i];
 
             if flash > 0 {
-                // Active flash — bright receptor + glow around it
-                let intensity = (flash as f32 / 8.0 * 255.0) as u8;
+                // Flash: bright lane color
+                let f = flash as f32 / 8.0;
+                let r = (cr as f32 * f).min(255.0) as u8;
+                let g = (cg as f32 * f).min(255.0) as u8;
+                let b = (cb as f32 * f).min(255.0) as u8;
 
-                // Glow: brighten the hit line around this lane
-                let glow_radius = 3u16;
-                for dx in 0..=glow_radius {
-                    let glow_b = (intensity as f32 * (1.0 - dx as f32 / glow_radius as f32) * 0.3) as u8;
-                    if glow_b > 5 {
-                        let style = Style::default().fg(Color::Rgb(glow_b, glow_b, glow_b));
-                        if cx + dx < area.x + area.width {
-                            buf.set_string(cx + dx, hit_y, "=", style);
-                        }
-                        if cx >= area.x + dx {
-                            buf.set_string(cx - dx, hit_y, "=", style);
-                        }
+                for x in lx..lx + lw {
+                    if x < area.x + area.width {
+                        buf.set_string(x, hit_y, " ", Style::default().bg(Color::Rgb(r, g, b)));
                     }
                 }
-
-                // Bright receptor
-                let receptor = format!("[{}]", label);
-                let w = receptor.chars().count() as u16;
-                let x = cx.saturating_sub(w / 2);
-                if x >= area.x && x + w < area.x + area.width {
-                    buf.set_string(x, hit_y, &receptor,
-                        Style::default().fg(Color::Rgb(intensity, intensity, intensity)).bold());
-                }
-
-                // Spark effect above receptor (row -1)
-                if hit_y > area.y {
-                    let spark_y = hit_y - 1;
-                    let spark_b = (intensity as f32 * 0.5) as u8;
-                    if cx >= area.x && cx < area.x + area.width {
-                        buf.set_string(cx, spark_y, "*",
-                            Style::default().fg(Color::Rgb(spark_b, spark_b, spark_b)));
-                    }
+                // Label on top
+                let label_x = lx + lw / 2;
+                if label_x < area.x + area.width {
+                    buf.set_string(label_x, hit_y, label,
+                        Style::default().fg(Color::Rgb(255, 255, 255)).bg(Color::Rgb(r, g, b)).bold());
                 }
             } else {
-                // Idle receptor
-                let receptor = format!("[{}]", label);
-                let w = receptor.chars().count() as u16;
-                let x = cx.saturating_sub(w / 2);
-                if x >= area.x && x + w < area.x + area.width {
-                    buf.set_string(x, hit_y, &receptor,
-                        Style::default().fg(Color::Rgb(60, 60, 60)));
+                // Idle: dim colored receptor
+                let r = (cr as f32 * 0.25) as u8;
+                let g = (cg as f32 * 0.25) as u8;
+                let b = (cb as f32 * 0.25) as u8;
+
+                for x in lx..lx + lw {
+                    if x < area.x + area.width {
+                        buf.set_string(x, hit_y, " ", Style::default().bg(Color::Rgb(r, g, b)));
+                    }
+                }
+                let label_x = lx + lw / 2;
+                if label_x < area.x + area.width {
+                    buf.set_string(label_x, hit_y, label,
+                        Style::default().fg(Color::Rgb(cr / 2, cg / 2, cb / 2)).bg(Color::Rgb(r, g, b)));
                 }
             }
         }
 
-        // Row 2: judgement feedback centered under hit zone
+        // Judgement feedback row
         let feedback_y = hit_y + 1;
         if feedback_y < area.y + area.height {
             if let Some(judgement) = self.last_judgement {
                 if self.judgement_timer > 0 {
                     let fade = self.judgement_timer as f32 / 30.0;
-                    let (text, base_b) = match judgement {
-                        Judgement::Perfect => ("* PERFECT *", 255.0),
-                        Judgement::Great =>   ("  GREAT  ", 200.0),
-                        Judgement::Good =>    ("  GOOD   ", 140.0),
-                        Judgement::Miss =>    ("  MISS   ", 70.0),
+                    let (text, color) = match judgement {
+                        Judgement::Perfect => ("PERFECT", Color::Rgb((255.0 * fade) as u8, (255.0 * fade) as u8, (200.0 * fade) as u8)),
+                        Judgement::Great =>   ("GREAT",   Color::Rgb((180.0 * fade) as u8, (220.0 * fade) as u8, (180.0 * fade) as u8)),
+                        Judgement::Good =>    ("GOOD",    Color::Rgb((140.0 * fade) as u8, (140.0 * fade) as u8, (140.0 * fade) as u8)),
+                        Judgement::Miss =>    ("MISS",    Color::Rgb((120.0 * fade) as u8, (50.0 * fade) as u8, (50.0 * fade) as u8)),
                     };
-                    let b = (base_b * fade) as u8;
-                    let x = (area.x + area.width / 2).saturating_sub(text.len() as u16 / 2);
-                    buf.set_string(x, feedback_y, text,
-                        Style::default().fg(Color::Rgb(b, b, b)).bold());
+                    let tw = text.len() as u16;
+                    let tx = area.x + area.width / 2 - tw / 2;
+                    buf.set_string(tx, feedback_y, text, Style::default().fg(color).bold());
                 }
             }
         }

@@ -61,7 +61,8 @@ impl ResultsScreen {
         ];
 
         for line in &stats {
-            buf.set_string(cx.saturating_sub(line.len() as u16 / 2), y, line, Style::default().fg(Color::Rgb(160, 160, 160)));
+            let w = line.chars().count() as u16;
+            buf.set_string(cx.saturating_sub(w / 2), y, line, Style::default().fg(Color::Rgb(160, 160, 160)));
             y += 1;
         }
         y += 2;
@@ -69,12 +70,13 @@ impl ResultsScreen {
         let options = ["Retry", "Back to songs"];
         for (i, option) in options.iter().enumerate() {
             let (prefix, style) = if i == self.selected {
-                ("▸ ", Style::default().fg(Color::White).bold())
+                ("> ", Style::default().fg(Color::White).bold())
             } else {
                 ("  ", Style::default().fg(Color::Rgb(100, 100, 100)))
             };
             let text = format!("{}{}", prefix, option);
-            buf.set_string(cx.saturating_sub(text.len() as u16 / 2), y, &text, style);
+            let w = text.chars().count() as u16;
+            buf.set_string(cx.saturating_sub(w / 2), y, &text, style);
             y += 1;
         }
     }
