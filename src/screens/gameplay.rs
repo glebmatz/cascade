@@ -1,6 +1,5 @@
 use ratatui::prelude::*;
 use ratatui::layout::{Layout, Constraint, Direction};
-use ratatui::widgets::Widget;
 use crate::app::{Action, Screen};
 use crate::audio::player::AudioPlayer;
 use crate::audio::analyzer::{SpectrumData, SpectrumAnalyzer};
@@ -10,7 +9,6 @@ use crate::game::hit_judge::{HitJudge, Judgement};
 use crate::game::highway::Highway;
 use crate::ui::highway_render::HighwayWidget;
 use crate::ui::hud::{HudTop, HudBottom};
-use crate::ui::visualizer::{WaveVisualizer, BlockVisualizer, Side};
 use std::path::Path;
 use anyhow::Result;
 
@@ -210,9 +208,9 @@ impl GameplayScreen {
         let vertical = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),   // wave bar + HUD
-                Constraint::Min(10),     // highway + sides
-                Constraint::Length(2),   // bottom HUD
+                Constraint::Length(1),   // top HUD
+                Constraint::Min(10),     // highway (full width)
+                Constraint::Length(1),   // bottom info
             ])
             .split(area);
 
@@ -220,31 +218,16 @@ impl GameplayScreen {
         let mid_area = vertical[1];
         let bot_area = vertical[2];
 
-        // Top: rhythm wave bar + HUD
-        WaveVisualizer { spectrum: &self.spectrum }
-            .render(Rect { height: 2, ..top_area }, buf);
-        HudTop { state: &self.state }
-            .render(Rect { y: top_area.y + 2, height: 1, ..top_area }, buf);
+        // Top HUD: combo left, score right
+        HudTop { state: &self.state }.render(top_area, buf);
 
-        // Middle: side visualizers + highway
-        let side_width = (mid_area.width / 6).max(4);
-        let horizontal = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(side_width),
-                Constraint::Min(20),
-                Constraint::Length(side_width),
-            ])
-            .split(mid_area);
-
-        BlockVisualizer { spectrum: &self.spectrum, side: Side::Left }.render(horizontal[0], buf);
+        // Highway — full width, no side panels
         HighwayWidget::new(&self.highway.visible_notes)
             .with_hit_flash(self.hit_flash)
             .with_judgement(self.state.last_judgement, self.judgement_timer)
-            .render(horizontal[1], buf);
-        BlockVisualizer { spectrum: &self.spectrum, side: Side::Right }.render(horizontal[2], buf);
+            .render(mid_area, buf);
 
-        // Bottom HUD
+        // Bottom info: song + accuracy + progress
         let progress = if self.beatmap.song.duration_ms > 0 {
             self.audio.position_ms() as f64 / self.beatmap.song.duration_ms as f64
         } else {
