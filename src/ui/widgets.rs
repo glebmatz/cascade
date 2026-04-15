@@ -17,13 +17,14 @@ impl<'a> Widget for MenuList<'a> {
             }
 
             let (prefix, style) = if i == self.selected {
-                ("▸ ", Style::default().fg(Color::White).bold())
+                ("> ", Style::default().fg(Color::White).bold())
             } else {
                 ("  ", Style::default().fg(Color::Rgb(100, 100, 100)))
             };
 
             let text = format!("{}{}", prefix, item);
-            let x = area.x + (area.width.saturating_sub(text.len() as u16)) / 2;
+            let text_w = text.chars().count() as u16;
+            let x = area.x + (area.width.saturating_sub(text_w)) / 2;
             buf.set_string(x, y, &text, style);
         }
     }
