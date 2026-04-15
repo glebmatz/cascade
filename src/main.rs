@@ -289,6 +289,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                                                             config.audio.offset_ms,
                                                             config.gameplay.scroll_speed,
                                                             config.audio.volume,
+                                                            config.gameplay.health_enabled,
                                                         ) {
                                                             Ok(mut gp) => {
                                                                 gp.start();

@@ -2,7 +2,7 @@ use ratatui::prelude::*;
 use crate::app::{Action, Screen};
 use crate::config::Config;
 
-const SETTINGS_ITEMS: &[&str] = &["Scroll Speed", "Volume", "Audio Offset (ms)", "Back"];
+const SETTINGS_ITEMS: &[&str] = &["Scroll Speed", "Volume", "Audio Offset (ms)", "Health", "Back"];
 
 pub struct SettingsScreen {
     pub config: Config,
@@ -29,6 +29,11 @@ impl SettingsScreen {
                 if self.selected == SETTINGS_ITEMS.len() - 1 {
                     self.save_if_modified();
                     Some(Action::Navigate(Screen::Menu))
+                } else if self.selected == 3 {
+                    // Toggle health
+                    self.config.gameplay.health_enabled = !self.config.gameplay.health_enabled;
+                    self.modified = true;
+                    None
                 } else {
                     None
                 }
@@ -56,6 +61,11 @@ impl SettingsScreen {
                         if decrease { self.config.audio.offset_ms = (self.config.audio.offset_ms - 5).max(-200); }
                         self.modified = true;
                     }
+                    3 => {
+                        // Toggle health with any lane key
+                        self.config.gameplay.health_enabled = !self.config.gameplay.health_enabled;
+                        self.modified = true;
+                    }
                     _ => {}
                 }
                 None
@@ -80,10 +90,12 @@ impl SettingsScreen {
         buf.set_string(cx.saturating_sub(title_w / 2), y, title, Style::default().fg(Color::White).bold());
         y += 3;
 
+        let health_str = if self.config.gameplay.health_enabled { "ON" } else { "OFF" };
         let values = [
             format!("{:.1}", self.config.gameplay.scroll_speed),
             format!("{:.0}%", self.config.audio.volume * 100.0),
             format!("{:+}ms", self.config.audio.offset_ms),
+            health_str.to_string(),
             String::new(),
         ];
 
@@ -96,6 +108,9 @@ impl SettingsScreen {
 
             let text = if value.is_empty() {
                 format!("{}{}", prefix, item)
+            } else if i == 3 {
+                // Health toggle — show differently
+                format!("{}{}:  [ {} ]", prefix, item, value)
             } else {
                 format!("{}{}:  < {} >", prefix, item, value)
             };
@@ -107,7 +122,7 @@ impl SettingsScreen {
         }
 
         y += 2;
-        let hint = "D/F: Decrease    J/K: Increase    ESC: Back";
+        let hint = "D/F/J/K: Adjust    Enter: Toggle    ESC: Back";
         let hint_w = hint.chars().count() as u16;
         let x = cx.saturating_sub(hint_w / 2);
         buf.set_string(x, y, hint, Style::default().fg(Color::Rgb(60, 60, 60)));
