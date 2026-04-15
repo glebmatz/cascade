@@ -27,14 +27,14 @@ async fn ensure_ytdlp(cascade_dir: &Path) -> Result<PathBuf> {
     let bin_dir = cascade_dir.join("bin");
     std::fs::create_dir_all(&bin_dir)?;
 
-    // Also check if yt-dlp is already in PATH
+    // Check if yt-dlp is already in PATH
     if let Ok(output) = tokio::process::Command::new("yt-dlp").arg("--version").output().await {
         if output.status.success() {
             return Ok(PathBuf::from("yt-dlp"));
         }
     }
 
-    // Use nightly builds — they have the latest YouTube JS challenge fixes
+    // Use nightly builds — latest YouTube fixes
     #[cfg(target_os = "macos")]
     let (filename, dl_url) = (
         "yt-dlp",
@@ -59,7 +59,6 @@ async fn ensure_ytdlp(cascade_dir: &Path) -> Result<PathBuf> {
         return Ok(ytdlp_path);
     }
 
-    // Download yt-dlp binary from GitHub releases
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()
@@ -69,23 +68,22 @@ async fn ensure_ytdlp(cascade_dir: &Path) -> Result<PathBuf> {
         .header("User-Agent", "cascade-game/0.1")
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Download yt-dlp failed: {} (url: {})", e, dl_url))?;
+        .map_err(|e| anyhow::anyhow!("Download yt-dlp failed: {}", e))?;
 
     if !response.status().is_success() {
-        anyhow::bail!("Download yt-dlp failed: HTTP {} from {}", response.status(), dl_url);
+        anyhow::bail!("Download yt-dlp failed: HTTP {}", response.status());
     }
 
     let bytes = response.bytes().await
         .context("Failed to read yt-dlp download body")?;
 
     if bytes.len() < 1000 {
-        anyhow::bail!("Downloaded yt-dlp is too small ({}b) — likely an error page", bytes.len());
+        anyhow::bail!("Downloaded yt-dlp is too small ({}b)", bytes.len());
     }
 
     std::fs::write(&ytdlp_path, &bytes)
         .context("Failed to write yt-dlp binary")?;
 
-    // Make executable on Unix
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -93,6 +91,46 @@ async fn ensure_ytdlp(cascade_dir: &Path) -> Result<PathBuf> {
     }
 
     Ok(ytdlp_path)
+}
+
+/// Build cookie args for yt-dlp. Extracts cookies to a file once,
+/// then reuses the file (no repeated keychain prompts).
+fn cookie_args(cascade_dir: &Path, ytdlp: &Path) -> Vec<String> {
+    let cookie_file = cascade_dir.join("cookies.txt");
+
+    // If we already have a cookie file, just use it
+    if cookie_file.exists() {
+        return vec!["--cookies".to_string(), cookie_file.to_string_lossy().to_string()];
+    }
+
+    // Try to extract cookies from a browser that doesn't need keychain
+    // Firefox stores cookies in its own sqlite — no keychain prompt on macOS
+    #[cfg(target_os = "macos")]
+    let browsers = &["firefox", "safari"];
+    #[cfg(not(target_os = "macos"))]
+    let browsers = &["firefox", "chrome"];
+
+    for browser in browsers {
+        // Try extracting cookies to file using yt-dlp
+        let result = std::process::Command::new(ytdlp)
+            .args([
+                "--cookies-from-browser", browser,
+                "--cookies", cookie_file.to_str().unwrap(),
+                "--skip-download",
+                "--flat-playlist",
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ", // dummy URL
+            ])
+            .output();
+
+        if let Ok(output) = result {
+            if cookie_file.exists() && std::fs::metadata(&cookie_file).map(|m| m.len() > 100).unwrap_or(false) {
+                return vec!["--cookies".to_string(), cookie_file.to_string_lossy().to_string()];
+            }
+        }
+    }
+
+    // No cookies available — try without
+    vec![]
 }
 
 pub async fn download_audio(url: &str, songs_dir: &Path) -> Result<Vec<ImportedSong>> {
@@ -103,16 +141,29 @@ pub async fn download_audio(url: &str, songs_dir: &Path) -> Result<Vec<ImportedS
     let ytdlp = ensure_ytdlp(&cascade_dir).await
         .context("Could not get yt-dlp")?;
 
-    // Get metadata first
-    let output = tokio::process::Command::new(&ytdlp)
-        .args(["--flat-playlist", "--dump-json", url])
-        .output()
-        .await
-        .context("Failed to run yt-dlp")?;
+    let cookies = cookie_args(&cascade_dir, &ytdlp);
+
+    // Get metadata
+    let mut cmd = tokio::process::Command::new(&ytdlp);
+    cmd.args(["--flat-playlist", "--dump-json"]);
+    for arg in &cookies {
+        cmd.arg(arg);
+    }
+    cmd.arg(url);
+
+    let output = cmd.output().await.context("Failed to run yt-dlp")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("yt-dlp error: {}", stderr.lines().last().unwrap_or(&stderr));
+        let last_line = stderr.lines().last().unwrap_or(&stderr);
+
+        // If bot detection, give helpful error
+        if stderr.contains("Sign in") || stderr.contains("bot") {
+            anyhow::bail!(
+                "YouTube requires authentication. Please install Firefox and log into YouTube there, then retry import."
+            );
+        }
+        anyhow::bail!("yt-dlp error: {}", last_line);
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -141,15 +192,14 @@ pub async fn download_audio(url: &str, songs_dir: &Path) -> Result<Vec<ImportedS
 
         // Download best audio stream in native format (no ffmpeg needed)
         let audio_template = song_dir.join("audio.%(ext)s");
-        let dl_output = tokio::process::Command::new(&ytdlp)
-            .args([
-                "-f", "bestaudio",
-                "--no-playlist",
-                "-o", audio_template.to_str().unwrap(),
-                entry_url,
-            ])
-            .output()
-            .await
+        let mut dl_cmd = tokio::process::Command::new(&ytdlp);
+        dl_cmd.args(["-f", "bestaudio", "--no-playlist"]);
+        for arg in &cookies {
+            dl_cmd.arg(arg);
+        }
+        dl_cmd.args(["-o", audio_template.to_str().unwrap(), entry_url]);
+
+        let dl_output = dl_cmd.output().await
             .context("Failed to run yt-dlp download")?;
 
         if !dl_output.status.success() {
