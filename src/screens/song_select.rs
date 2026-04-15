@@ -58,9 +58,10 @@ impl SongSelectScreen {
                 (path.file_name().unwrap_or_default().to_string_lossy().to_string(), String::new())
             };
 
-            // Check if at least one beatmap exists
+            // Check if at least one beatmap AND audio file exist
             let has_beatmap = Difficulty::all().iter().any(|d| path.join(d.filename()).exists());
-            if !has_beatmap { continue; }
+            let has_audio = find_audio_file(&path).is_some();
+            if !has_beatmap || !has_audio { continue; }
 
             self.songs.push(SongEntry { title, artist, dir: path });
         }
@@ -76,7 +77,7 @@ impl SongSelectScreen {
     }
 
     pub fn selected_audio_path(&self) -> Option<PathBuf> {
-        self.songs.get(self.selected).map(|s| s.dir.join("audio.mp3"))
+        self.songs.get(self.selected).and_then(|s| find_audio_file(&s.dir))
     }
 
     pub fn selected_song_title(&self) -> String {
@@ -182,4 +183,23 @@ impl SongSelectScreen {
         let x = area.x + (area.width.saturating_sub(footer.len() as u16)) / 2;
         buf.set_string(x, area.y + area.height - 1, footer, Style::default().fg(Color::Rgb(60, 60, 60)));
     }
+}
+
+/// Find audio file in a song directory. Supports mp3, m4a, webm, opus, ogg, wav, flac.
+pub fn find_audio_file(dir: &Path) -> Option<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return None };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with("audio.") {
+            let ext = name_str.rsplit('.').next().unwrap_or("");
+            match ext {
+                "mp3" | "m4a" | "webm" | "opus" | "ogg" | "wav" | "flac" => {
+                    return Some(entry.path());
+                }
+                _ => {}
+            }
+        }
+    }
+    None
 }
