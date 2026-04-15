@@ -140,13 +140,14 @@ impl SongSelectScreen {
         buf.set_string(x, area.y + 3, &diff_text, Style::default().fg(Color::Rgb(140, 140, 140)));
 
         if self.import_mode {
-            let prompt = format!("YouTube URL: {}_", self.import_input);
+            let prompt = format!("Path to audio file: {}_", self.import_input);
             let x = area.x + 4;
             let y = area.y + area.height / 2;
             buf.set_string(x, y, &prompt, Style::default().fg(Color::White));
-            buf.set_string(x, y + 2, "Enter: Import   ESC: Cancel", Style::default().fg(Color::Rgb(80, 80, 80)));
+            buf.set_string(x, y + 2, "Supports: mp3, wav, flac, ogg, m4a, opus, webm", Style::default().fg(Color::Rgb(80, 80, 80)));
+            buf.set_string(x, y + 3, "Enter: Import   ESC: Cancel", Style::default().fg(Color::Rgb(60, 60, 60)));
         } else if self.songs.is_empty() {
-            let msg = "No songs found. Press 'i' to import from YouTube.";
+            let msg = "No songs found. Press 'i' to import an audio file.";
             let x = area.x + (area.width.saturating_sub(msg.len() as u16)) / 2;
             buf.set_string(x, area.y + area.height / 2, msg, Style::default().fg(Color::Rgb(100, 100, 100)));
         } else {
@@ -179,7 +180,7 @@ impl SongSelectScreen {
             buf.set_string(area.x + 2, y, status, Style::default().fg(Color::Rgb(120, 120, 120)));
         }
 
-        let footer = "Enter: Play  Tab: Difficulty  i: Import  ESC: Back";
+        let footer = "Enter: Play  Tab: Difficulty  i: Import file  ESC: Back";
         let x = area.x + (area.width.saturating_sub(footer.len() as u16)) / 2;
         buf.set_string(x, area.y + area.height - 1, footer, Style::default().fg(Color::Rgb(60, 60, 60)));
     }
