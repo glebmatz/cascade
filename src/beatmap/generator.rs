@@ -89,10 +89,10 @@ pub fn detect_onsets(samples: &[f32], sample_rate: u32) -> Vec<OnsetInfo> {
 
 pub fn place_notes(onsets: &[OnsetInfo], difficulty: Difficulty) -> Vec<Note> {
     let (threshold, min_gap_ms) = match difficulty {
-        Difficulty::Easy => (0.6, 400u64),
-        Difficulty::Medium => (0.4, 250),
-        Difficulty::Hard => (0.25, 150),
-        Difficulty::Expert => (0.15, 80),
+        Difficulty::Easy => (0.65, 600u64),
+        Difficulty::Medium => (0.45, 400),
+        Difficulty::Hard => (0.35, 280),
+        Difficulty::Expert => (0.2, 160),
     };
 
     let mut notes = Vec::new();
@@ -106,8 +106,33 @@ pub fn place_notes(onsets: &[OnsetInfo], difficulty: Difficulty) -> Vec<Note> {
         }
 
         let lane = freq_band_to_lane(onset.freq_band, last_lane);
-        notes.push(Note { time_ms: onset.time_ms, lane });
-        last_time = Some(onset.time_ms);
+
+        // Determine if this should be a hold note:
+        // Strong onsets with a big gap before next onset become holds
+        let duration_ms = if onset.strength > 0.6 {
+            // Find time to next onset
+            let next_onset_time = onsets.iter()
+                .find(|o| o.time_ms > onset.time_ms + 100)
+                .map(|o| o.time_ms);
+
+            if let Some(next_t) = next_onset_time {
+                let gap = next_t - onset.time_ms;
+                if gap > min_gap_ms * 2 {
+                    // Hold for ~60% of the gap, capped at 2 seconds
+                    ((gap as f64 * 0.6) as u64).min(2000).max(200)
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        notes.push(Note { time_ms: onset.time_ms, lane, duration_ms });
+        let end_time = onset.time_ms + duration_ms;
+        last_time = Some(end_time.max(onset.time_ms));
         last_lane = Some(lane);
     }
 

@@ -143,7 +143,20 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                         _ => {}
                     }
                 } else {
-                    let action = input::map_key(key, &config.keys.lanes);
+                    // Use context-aware key mapping
+                    let action = match app.screen {
+                        Screen::Gameplay => input::map_key_gameplay(key, &config.keys.lanes),
+                        Screen::Settings => {
+                            // Settings needs both menu nav AND game keys for value adjustment
+                            let menu_action = input::map_key_menu(key);
+                            if menu_action == Action::None {
+                                input::map_key_gameplay(key, &config.keys.lanes)
+                            } else {
+                                menu_action
+                            }
+                        }
+                        _ => input::map_key_menu(key),
+                    };
 
                     let result_action = match app.screen {
                         Screen::Menu => {

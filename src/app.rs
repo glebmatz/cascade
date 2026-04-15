@@ -20,6 +20,7 @@ pub enum Action {
     Back,
     Tab,
     Import,
+    Delete,
 }
 
 pub struct App {

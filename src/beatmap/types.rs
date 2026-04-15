@@ -56,4 +56,7 @@ impl std::fmt::Display for Difficulty {
 pub struct Note {
     pub time_ms: u64,
     pub lane: u8,
+    /// Duration in ms for hold notes. 0 = tap note.
+    #[serde(default)]
+    pub duration_ms: u64,
 }
