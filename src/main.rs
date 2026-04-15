@@ -221,6 +221,16 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
 
                                         if let (Some(bp), Some(ap)) = (beatmap_path, audio_path) {
                                             if bp.exists() && ap.exists() {
+                                                // Show loading screen
+                                                terminal.draw(|frame| {
+                                                    let area = frame.area();
+                                                    let buf = frame.buffer_mut();
+                                                    let msg = "Loading...";
+                                                    let x = area.x + (area.width.saturating_sub(msg.len() as u16)) / 2;
+                                                    let y = area.y + area.height / 2;
+                                                    buf.set_string(x, y, msg, Style::default().fg(Color::Rgb(140, 140, 140)));
+                                                })?;
+
                                                 match beatmap::loader::load(&bp) {
                                                     Ok(bm) => {
                                                         last_song_title = song_select.selected_song_title();
