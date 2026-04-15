@@ -114,6 +114,18 @@ impl SongSelectScreen {
                 self.cycle_difficulty();
                 None
             }
+            Action::Delete => {
+                if !self.songs.is_empty() {
+                    let song = &self.songs[self.selected];
+                    let _ = std::fs::remove_dir_all(&song.dir);
+                    self.songs.remove(self.selected);
+                    if self.selected >= self.songs.len() && self.selected > 0 {
+                        self.selected -= 1;
+                    }
+                    self.import_status = Some("Song deleted".to_string());
+                }
+                None
+            }
             Action::Back | Action::Pause => Some(Action::Navigate(Screen::Menu)),
             _ => None,
         }
@@ -180,7 +192,7 @@ impl SongSelectScreen {
             buf.set_string(area.x + 2, y, status, Style::default().fg(Color::Rgb(120, 120, 120)));
         }
 
-        let footer = "Enter: Play  Tab: Difficulty  i: Import file  ESC: Back";
+        let footer = "Enter: Play  Tab: Difficulty  i: Import  x: Delete  ESC: Back";
         let x = area.x + (area.width.saturating_sub(footer.len() as u16)) / 2;
         buf.set_string(x, area.y + area.height - 1, footer, Style::default().fg(Color::Rgb(60, 60, 60)));
     }

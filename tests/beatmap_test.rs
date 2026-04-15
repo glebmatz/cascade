@@ -15,10 +15,10 @@ fn test_beatmap_serialization_roundtrip() {
         },
         difficulty: Difficulty::Hard,
         notes: vec![
-            Note { time_ms: 1000, lane: 0 },
-            Note { time_ms: 1200, lane: 2 },
-            Note { time_ms: 1200, lane: 4 },
-            Note { time_ms: 1500, lane: 1 },
+            Note { time_ms: 1000, lane: 0, duration_ms: 0 },
+            Note { time_ms: 1200, lane: 2, duration_ms: 500 },
+            Note { time_ms: 1200, lane: 4, duration_ms: 0 },
+            Note { time_ms: 1500, lane: 1, duration_ms: 0 },
         ],
     };
 

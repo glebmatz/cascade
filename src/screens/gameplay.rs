@@ -21,6 +21,7 @@ pub struct GameplayScreen {
     pub highway: Highway,
     pub judge: HitJudge,
     pub hit_notes: Vec<bool>,
+    pub held_notes: Vec<Option<usize>>, // per lane: index of note being held
     pub hit_flash: [u8; 5],
     pub paused: bool,
     pub finished: bool,
@@ -52,6 +53,7 @@ impl GameplayScreen {
             judge: HitJudge::new(offset_ms),
             state: GameState::new(),
             hit_notes,
+            held_notes: vec![None; 5],
             hit_flash: [0; 5],
             paused: false,
             finished: false,
@@ -80,12 +82,35 @@ impl GameplayScreen {
         // Update highway
         self.highway.update(&self.beatmap.notes, current_ms, 2000, &self.hit_notes);
 
-        // Auto-miss expired notes
+        // Auto-miss expired tap notes, check hold note completions
         for (i, note) in self.beatmap.notes.iter().enumerate() {
-            if !self.hit_notes[i] && self.judge.is_expired(note.time_ms, current_ms) {
-                self.hit_notes[i] = true;
-                self.state.register_judgement(Judgement::Miss);
-                self.judgement_timer = 30;
+            if self.hit_notes[i] { continue; }
+
+            if note.duration_ms > 0 {
+                // Hold note: check if it's being held and has completed
+                let lane = note.lane as usize;
+                if self.held_notes[lane] == Some(i) {
+                    let note_end = note.time_ms + note.duration_ms;
+                    if current_ms >= note_end {
+                        // Successfully held to end
+                        self.hit_notes[i] = true;
+                        self.held_notes[lane] = None;
+                        self.state.register_judgement(Judgement::Perfect);
+                        self.judgement_timer = 30;
+                    }
+                } else if self.judge.is_expired(note.time_ms, current_ms) {
+                    // Never started holding
+                    self.hit_notes[i] = true;
+                    self.state.register_judgement(Judgement::Miss);
+                    self.judgement_timer = 30;
+                }
+            } else {
+                // Tap note
+                if self.judge.is_expired(note.time_ms, current_ms) {
+                    self.hit_notes[i] = true;
+                    self.state.register_judgement(Judgement::Miss);
+                    self.judgement_timer = 30;
+                }
             }
         }
 
@@ -139,9 +164,11 @@ impl GameplayScreen {
                 self.hit_flash[lane] = 8;
                 let current_ms = self.audio.position_ms();
 
+                // Skip notes that are already being held
                 let mut best: Option<(usize, u64)> = None;
                 for (i, note) in self.beatmap.notes.iter().enumerate() {
                     if self.hit_notes[i] || note.lane as usize != lane { continue; }
+                    if self.held_notes[lane] == Some(i) { continue; }
                     let diff = (note.time_ms as i64 - current_ms as i64).unsigned_abs();
                     if diff <= 100 {
                         if best.is_none() || diff < best.unwrap().1 {
@@ -151,11 +178,21 @@ impl GameplayScreen {
                 }
 
                 if let Some((note_idx, _)) = best {
-                    let note_time = self.beatmap.notes[note_idx].time_ms;
-                    let judgement = self.judge.judge(note_time, current_ms);
-                    self.hit_notes[note_idx] = true;
-                    self.state.register_judgement(judgement);
-                    self.judgement_timer = 30;
+                    let note = &self.beatmap.notes[note_idx];
+                    let judgement = self.judge.judge(note.time_ms, current_ms);
+
+                    if note.duration_ms > 0 {
+                        // Hold note: register initial hit and start holding
+                        self.state.register_judgement(judgement);
+                        self.judgement_timer = 30;
+                        self.held_notes[lane] = Some(note_idx);
+                        // Don't mark as hit yet — completed when hold ends
+                    } else {
+                        // Tap note
+                        self.hit_notes[note_idx] = true;
+                        self.state.register_judgement(judgement);
+                        self.judgement_timer = 30;
+                    }
                 }
                 None
             }

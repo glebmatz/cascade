@@ -99,8 +99,27 @@ impl<'a> Widget for HighwayWidget<'a> {
             }
         }
 
-        // Draw notes — wider and brighter
+        // Draw notes
         for note in self.notes {
+            let is_hold = note.duration_ms > 0;
+
+            // Draw hold note trail first (behind the note head)
+            if is_hold && note.end_position > note.position {
+                let start_row = ((1.0 - note.end_position.clamp(0.0, 1.0)) * highway_height as f64) as u16;
+                let end_row = ((1.0 - note.position.clamp(0.0, 1.0)) * highway_height as f64) as u16;
+
+                for row in start_row..=end_row {
+                    let y = area.y + row.min(highway_height.saturating_sub(1));
+                    let pos = 1.0 - (row as f64 / highway_height as f64);
+                    let cx = self.lane_x(note.lane as usize, pos, area);
+                    if cx >= area.x && cx < area.x + area.width && y >= area.y && y < area.y + area.height {
+                        let brightness = ((1.0 - pos) * 120.0 + 40.0).min(160.0) as u8;
+                        buf.set_string(cx, y, "|", Style::default().fg(Color::Rgb(brightness, brightness, brightness)));
+                    }
+                }
+            }
+
+            // Draw note head
             if note.position < -0.05 || note.position > 1.0 {
                 continue;
             }
