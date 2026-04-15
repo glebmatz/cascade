@@ -102,12 +102,17 @@ pub async fn download_audio(url: &str, songs_dir: &Path) -> Result<Vec<ImportedS
     let ytdlp = ensure_ytdlp(&cascade_dir).await
         .context("Could not get yt-dlp")?;
 
+    // Detect available browser for cookies
+    let browser = detect_cookie_browser().await;
+
     // Get metadata first
-    let output = tokio::process::Command::new(&ytdlp)
-        .args(["--flat-playlist", "--dump-json", url])
-        .output()
-        .await
-        .context("Failed to run yt-dlp")?;
+    let mut cmd = tokio::process::Command::new(&ytdlp);
+    cmd.args(["--flat-playlist", "--dump-json"]);
+    if let Some(ref b) = browser {
+        cmd.args(["--cookies-from-browser", b]);
+    }
+    cmd.arg(url);
+    let output = cmd.output().await.context("Failed to run yt-dlp")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -141,16 +146,18 @@ pub async fn download_audio(url: &str, songs_dir: &Path) -> Result<Vec<ImportedS
         let audio_path = song_dir.join("audio.mp3");
 
         // Download audio
-        let dl_output = tokio::process::Command::new(&ytdlp)
-            .args([
+        let mut dl_cmd = tokio::process::Command::new(&ytdlp);
+        dl_cmd.args([
                 "--extract-audio",
                 "--audio-format", "mp3",
                 "--audio-quality", "0",
                 "--no-playlist",
-                "-o", audio_path.to_str().unwrap(),
-                entry_url,
-            ])
-            .output()
+        ]);
+        if let Some(ref b) = browser {
+            dl_cmd.args(["--cookies-from-browser", b]);
+        }
+        dl_cmd.args(["-o", audio_path.to_str().unwrap(), entry_url]);
+        let dl_output = dl_cmd.output()
             .await
             .context("Failed to run yt-dlp download")?;
 
@@ -195,6 +202,40 @@ pub async fn download_audio(url: &str, songs_dir: &Path) -> Result<Vec<ImportedS
     }
 
     Ok(results)
+}
+
+/// Try to find a browser with YouTube cookies.
+/// Tries chrome, firefox, safari in order.
+async fn detect_cookie_browser() -> Option<String> {
+    for browser in &["chrome", "firefox", "safari"] {
+        // We can't easily test if cookies exist without yt-dlp,
+        // so just return the first browser that's likely installed
+        let check = match *browser {
+            "chrome" => {
+                #[cfg(target_os = "macos")]
+                { Path::new("/Applications/Google Chrome.app").exists() }
+                #[cfg(not(target_os = "macos"))]
+                { true } // assume chrome on linux/windows
+            }
+            "firefox" => {
+                #[cfg(target_os = "macos")]
+                { Path::new("/Applications/Firefox.app").exists() }
+                #[cfg(not(target_os = "macos"))]
+                { false }
+            }
+            "safari" => {
+                #[cfg(target_os = "macos")]
+                { Path::new("/Applications/Safari.app").exists() }
+                #[cfg(not(target_os = "macos"))]
+                { false }
+            }
+            _ => false,
+        };
+        if check {
+            return Some(browser.to_string());
+        }
+    }
+    None
 }
 
 fn glob_first(dir: &Path, prefix: &str) -> Option<PathBuf> {
