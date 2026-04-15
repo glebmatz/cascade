@@ -34,22 +34,23 @@ async fn ensure_ytdlp(cascade_dir: &Path) -> Result<PathBuf> {
         }
     }
 
+    // Use nightly builds — they have the latest YouTube JS challenge fixes
     #[cfg(target_os = "macos")]
-    let (filename, dl_url) = {
-        // macos = universal binary (arm64+x86_64), macos_legacy = old x86_64 only
-        ("yt-dlp", "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos".to_string())
-    };
+    let (filename, dl_url) = (
+        "yt-dlp",
+        "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp_macos".to_string(),
+    );
 
     #[cfg(target_os = "linux")]
     let (filename, dl_url) = (
         "yt-dlp",
-        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux".to_string(),
+        "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp_linux".to_string(),
     );
 
     #[cfg(target_os = "windows")]
     let (filename, dl_url) = (
         "yt-dlp.exe",
-        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe".to_string(),
+        "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.exe".to_string(),
     );
 
     let ytdlp_path = bin_dir.join(filename);
@@ -102,17 +103,12 @@ pub async fn download_audio(url: &str, songs_dir: &Path) -> Result<Vec<ImportedS
     let ytdlp = ensure_ytdlp(&cascade_dir).await
         .context("Could not get yt-dlp")?;
 
-    // Detect available browser for cookies
-    let browser = detect_cookie_browser().await;
-
     // Get metadata first
-    let mut cmd = tokio::process::Command::new(&ytdlp);
-    cmd.args(["--flat-playlist", "--dump-json"]);
-    if let Some(ref b) = browser {
-        cmd.args(["--cookies-from-browser", b]);
-    }
-    cmd.arg(url);
-    let output = cmd.output().await.context("Failed to run yt-dlp")?;
+    let output = tokio::process::Command::new(&ytdlp)
+        .args(["--flat-playlist", "--dump-json", url])
+        .output()
+        .await
+        .context("Failed to run yt-dlp")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -145,16 +141,14 @@ pub async fn download_audio(url: &str, songs_dir: &Path) -> Result<Vec<ImportedS
 
         // Download best audio stream in native format (no ffmpeg needed)
         let audio_template = song_dir.join("audio.%(ext)s");
-        let mut dl_cmd = tokio::process::Command::new(&ytdlp);
-        dl_cmd.args([
+        let dl_output = tokio::process::Command::new(&ytdlp)
+            .args([
                 "-f", "bestaudio",
                 "--no-playlist",
-        ]);
-        if let Some(ref b) = browser {
-            dl_cmd.args(["--cookies-from-browser", b]);
-        }
-        dl_cmd.args(["-o", audio_template.to_str().unwrap(), entry_url]);
-        let dl_output = dl_cmd.output()
+                "-o", audio_template.to_str().unwrap(),
+                entry_url,
+            ])
+            .output()
             .await
             .context("Failed to run yt-dlp download")?;
 
@@ -190,40 +184,6 @@ pub async fn download_audio(url: &str, songs_dir: &Path) -> Result<Vec<ImportedS
     }
 
     Ok(results)
-}
-
-/// Try to find a browser with YouTube cookies.
-/// Tries chrome, firefox, safari in order.
-async fn detect_cookie_browser() -> Option<String> {
-    for browser in &["chrome", "firefox", "safari"] {
-        // We can't easily test if cookies exist without yt-dlp,
-        // so just return the first browser that's likely installed
-        let check = match *browser {
-            "chrome" => {
-                #[cfg(target_os = "macos")]
-                { Path::new("/Applications/Google Chrome.app").exists() }
-                #[cfg(not(target_os = "macos"))]
-                { true } // assume chrome on linux/windows
-            }
-            "firefox" => {
-                #[cfg(target_os = "macos")]
-                { Path::new("/Applications/Firefox.app").exists() }
-                #[cfg(not(target_os = "macos"))]
-                { false }
-            }
-            "safari" => {
-                #[cfg(target_os = "macos")]
-                { Path::new("/Applications/Safari.app").exists() }
-                #[cfg(not(target_os = "macos"))]
-                { false }
-            }
-            _ => false,
-        };
-        if check {
-            return Some(browser.to_string());
-        }
-    }
-    None
 }
 
 fn glob_first(dir: &Path, prefix: &str) -> Option<PathBuf> {
