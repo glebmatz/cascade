@@ -143,20 +143,17 @@ pub async fn download_audio(url: &str, songs_dir: &Path) -> Result<Vec<ImportedS
         let song_dir = songs_dir.join(&slug);
         std::fs::create_dir_all(&song_dir)?;
 
-        let audio_path = song_dir.join("audio.mp3");
-
-        // Download audio
+        // Download best audio stream in native format (no ffmpeg needed)
+        let audio_template = song_dir.join("audio.%(ext)s");
         let mut dl_cmd = tokio::process::Command::new(&ytdlp);
         dl_cmd.args([
-                "--extract-audio",
-                "--audio-format", "mp3",
-                "--audio-quality", "0",
+                "-f", "bestaudio",
                 "--no-playlist",
         ]);
         if let Some(ref b) = browser {
             dl_cmd.args(["--cookies-from-browser", b]);
         }
-        dl_cmd.args(["-o", audio_path.to_str().unwrap(), entry_url]);
+        dl_cmd.args(["-o", audio_template.to_str().unwrap(), entry_url]);
         let dl_output = dl_cmd.output()
             .await
             .context("Failed to run yt-dlp download")?;
@@ -167,37 +164,28 @@ pub async fn download_audio(url: &str, songs_dir: &Path) -> Result<Vec<ImportedS
             continue;
         }
 
-        // yt-dlp may add extension, find the actual file
-        let actual_audio = if audio_path.exists() {
-            audio_path.clone()
-        } else {
-            // yt-dlp sometimes creates audio.mp3.mp3 or similar
-            let pattern = song_dir.join("audio*");
-            let found = glob_first(&song_dir, "audio");
-            found.unwrap_or(audio_path.clone())
-        };
+        // Find the downloaded audio file (could be .webm, .m4a, .opus, etc)
+        let actual_audio = glob_first(&song_dir, "audio")
+            .context("Downloaded audio file not found")?;
 
         // Write metadata
+        let audio_filename = actual_audio.file_name().unwrap().to_string_lossy().to_string();
         let artist = entry.get("uploader").and_then(|v| v.as_str()).unwrap_or("");
         let meta = serde_json::json!({
             "title": title,
             "artist": artist,
             "source_url": entry_url,
+            "audio_file": audio_filename,
         });
         std::fs::write(
             song_dir.join("metadata.json"),
             serde_json::to_string_pretty(&meta)?,
         )?;
 
-        // Rename to audio.mp3 if needed
-        if actual_audio != audio_path && actual_audio.exists() {
-            let _ = std::fs::rename(&actual_audio, &audio_path);
-        }
-
         results.push(ImportedSong {
             title: title.to_string(),
             dir: song_dir,
-            audio_path,
+            audio_path: actual_audio,
         });
     }
 
