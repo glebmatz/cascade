@@ -215,9 +215,18 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                                         gameplay = None;
                                     }
                                     Screen::Gameplay => {
-                                        // Load beatmap and start gameplay
-                                        let beatmap_path = last_beatmap_path.clone().or_else(|| song_select.selected_beatmap_path());
-                                        let audio_path = last_audio_path.clone().or_else(|| song_select.selected_audio_path());
+                                        // Load beatmap: fresh selection from song_select, or retry from last
+                                        let from_song_select = app.screen == Screen::SongSelect;
+                                        let beatmap_path = if from_song_select {
+                                            song_select.selected_beatmap_path()
+                                        } else {
+                                            last_beatmap_path.clone().or_else(|| song_select.selected_beatmap_path())
+                                        };
+                                        let audio_path = if from_song_select {
+                                            song_select.selected_audio_path()
+                                        } else {
+                                            last_audio_path.clone().or_else(|| song_select.selected_audio_path())
+                                        };
 
                                         if let (Some(bp), Some(ap)) = (beatmap_path, audio_path) {
                                             if bp.exists() && ap.exists() {
