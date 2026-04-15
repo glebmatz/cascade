@@ -10,16 +10,20 @@ impl<'a> Widget for HudTop<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         if area.width < 30 { return; }
 
-        // Combo left
+        let cx = area.x + area.width / 2;
+
+        // Combo: left of center
         if self.state.combo > 1 {
             let combo_text = format!("x{} COMBO", self.state.combo);
-            buf.set_string(area.x + 2, area.y, &combo_text,
+            let combo_w = combo_text.chars().count() as u16;
+            let combo_x = cx.saturating_sub(combo_w + 8);
+            buf.set_string(combo_x, area.y, &combo_text,
                 Style::default().fg(Color::Rgb(180, 180, 180)));
         }
 
-        // Score right
-        let score_text = format!("SCORE {:>8}", self.state.score);
-        let score_x = area.x + area.width.saturating_sub(score_text.len() as u16 + 2);
+        // Score: right of center
+        let score_text = format!("SCORE {}", self.state.score);
+        let score_x = cx + 4;
         buf.set_string(score_x, area.y, &score_text,
             Style::default().fg(Color::Rgb(180, 180, 180)));
     }
