@@ -3,14 +3,13 @@ use ratatui::widgets::Widget;
 use crate::app::{Action, Screen};
 use crate::ui::widgets::MenuList;
 
-const LOGO: &str = r#"
-   ▄████▄   ▄▄▄        ██████  ▄████▄   ▄▄▄      ▓█████▄ ▓█████
-  ▒██▀ ▀█  ▒████▄    ▒██    ▒ ▒██▀ ▀█  ▒████▄    ▒██▀ ██▌▓█   ▀
-  ▒▓█    ▄ ▒██  ▀█▄  ░ ▓██▄   ▒▓█    ▄ ▒██  ▀█▄  ░██   █▌▒███
-  ▒▓▓▄ ▄██▒░██▄▄▄▄██   ▒   ██▒▒▓▓▄ ▄██▒░██▄▄▄▄██ ░▓█▄   ▌▒▓█  ▄
-  ▒ ▓███▀ ░ ▓█   ▓██▒▒██████▒▒▒ ▓███▀ ░ ▓█   ▓██▒░▒████▓ ░▒████▒
-  ░ ░▒ ▒  ░ ▒▒   ▓▒█░▒ ▒▓▒ ▒ ░░ ░▒ ▒  ░ ▒▒   ▓▒█░ ▒▒▓  ▒ ░░ ▒░ ░
-"#;
+const LOGO_LINES: &[&str] = &[
+    r"  ____                        _      ",
+    r" / ___|__ _ ___  ___ __ _  __| | ___ ",
+    r"| |   / _` / __|/ __/ _` |/ _` |/ _ \",
+    r"| |__| (_| \__ \ (_| (_| | (_| |  __/",
+    r" \____\__,_|___/\___\__,_|\__,_|\___|",
+];
 
 const MENU_ITEMS: &[&str] = &["Play", "Settings", "Quit"];
 
@@ -46,13 +45,14 @@ impl MenuScreen {
     pub fn render(&self, frame: &mut Frame, area: Rect) {
         let buf = frame.buffer_mut();
 
-        let logo_height = LOGO.lines().count() as u16;
+        let logo_height = LOGO_LINES.len() as u16;
         let logo_y = area.y + 2;
-        for (i, line) in LOGO.lines().enumerate() {
+        for (i, line) in LOGO_LINES.iter().enumerate() {
             let y = logo_y + i as u16;
             if y >= area.y + area.height { break; }
-            let x = area.x + area.width.saturating_sub(line.len() as u16) / 2;
-            buf.set_string(x, y, line, Style::default().fg(Color::Rgb(160, 160, 160)));
+            let line_width = line.chars().count() as u16;
+            let x = area.x + area.width.saturating_sub(line_width) / 2;
+            buf.set_string(x, y, line, Style::default().fg(Color::Rgb(180, 180, 180)));
         }
 
         let menu_area = Rect {

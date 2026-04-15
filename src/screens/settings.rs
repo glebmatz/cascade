@@ -76,7 +76,8 @@ impl SettingsScreen {
         let mut y = area.y + 3;
 
         let title = "SETTINGS";
-        buf.set_string(cx.saturating_sub(title.len() as u16 / 2), y, title, Style::default().fg(Color::White).bold());
+        let title_w = title.chars().count() as u16;
+        buf.set_string(cx.saturating_sub(title_w / 2), y, title, Style::default().fg(Color::White).bold());
         y += 3;
 
         let values = [
@@ -88,7 +89,7 @@ impl SettingsScreen {
 
         for (i, (item, value)) in SETTINGS_ITEMS.iter().zip(values.iter()).enumerate() {
             let (prefix, style) = if i == self.selected {
-                ("▸ ", Style::default().fg(Color::White).bold())
+                ("> ", Style::default().fg(Color::White).bold())
             } else {
                 ("  ", Style::default().fg(Color::Rgb(100, 100, 100)))
             };
@@ -96,17 +97,19 @@ impl SettingsScreen {
             let text = if value.is_empty() {
                 format!("{}{}", prefix, item)
             } else {
-                format!("{}{}:  ◂ {} ▸", prefix, item, value)
+                format!("{}{}:  < {} >", prefix, item, value)
             };
 
-            let x = cx.saturating_sub(text.len() as u16 / 2);
+            let text_w = text.chars().count() as u16;
+            let x = cx.saturating_sub(text_w / 2);
             buf.set_string(x, y, &text, style);
             y += 2;
         }
 
         y += 2;
         let hint = "D/F: Decrease    J/K: Increase    ESC: Back";
-        let x = cx.saturating_sub(hint.len() as u16 / 2);
+        let hint_w = hint.chars().count() as u16;
+        let x = cx.saturating_sub(hint_w / 2);
         buf.set_string(x, y, hint, Style::default().fg(Color::Rgb(60, 60, 60)));
     }
 }
