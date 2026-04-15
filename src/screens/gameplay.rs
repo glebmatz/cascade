@@ -28,6 +28,8 @@ pub struct GameplayScreen {
     pub analyzer: SpectrumAnalyzer,
     pub samples: Vec<f32>,
     pub sample_rate: u32,
+    pub particles: Vec<(u16, u16, u8)>,
+    pub last_render_area: Option<Rect>,
 }
 
 impl GameplayScreen {
@@ -60,6 +62,8 @@ impl GameplayScreen {
             analyzer: SpectrumAnalyzer::new(),
             samples,
             sample_rate,
+            particles: Vec::new(),
+            last_render_area: None,
             beatmap,
             audio,
         })
@@ -138,8 +142,17 @@ impl GameplayScreen {
             }
         }
 
-        // Check if song finished
+        // Decay particles
+        for p in &mut self.particles {
+            p.2 = p.2.saturating_sub(1);
+        }
+        self.particles.retain(|p| p.2 > 0);
+
+        // Check if song finished or player died
         if self.audio.is_finished() || (current_ms > self.beatmap.song.duration_ms + 2000) {
+            self.finished = true;
+        }
+        if self.state.is_dead() {
             self.finished = true;
         }
     }
@@ -191,6 +204,24 @@ impl GameplayScreen {
                         self.state.register_judgement(judgement);
                         self.judgement_timer = 30;
                     }
+
+                    // Spawn particles on Perfect/Great hits
+                    if matches!(judgement, Judgement::Perfect | Judgement::Great) {
+                        if let Some(area) = self.last_render_area {
+                            let count = if judgement == Judgement::Perfect { 5 } else { 3 };
+                            // Approximate receptor position for this lane
+                            let lane_width = area.width / 5;
+                            let lane_cx = area.x + lane as u16 * lane_width + lane_width / 2;
+                            let hit_y = area.y + area.height.saturating_sub(4);
+                            for i in 0..count {
+                                let dx = (i as i16 - count as i16 / 2) * 2;
+                                let dy = -(i as i16 % 3);
+                                let px = (lane_cx as i16 + dx).max(0) as u16;
+                                let py = (hit_y as i16 + dy).max(0) as u16;
+                                self.particles.push((px, py, 10));
+                            }
+                        }
+                    }
                 }
                 None
             }
@@ -202,7 +233,8 @@ impl GameplayScreen {
         }
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+        self.last_render_area = Some(area);
         let buf = frame.buffer_mut();
 
         let vertical = Layout::default()
@@ -225,6 +257,8 @@ impl GameplayScreen {
         HighwayWidget::new(&self.highway.visible_notes)
             .with_hit_flash(self.hit_flash)
             .with_judgement(self.state.last_judgement, self.judgement_timer)
+            .with_particles(&self.particles)
+            .with_energy(self.spectrum.energy)
             .render(mid_area, buf);
 
         // Bottom info: song + accuracy + progress
@@ -239,6 +273,7 @@ impl GameplayScreen {
             song_title: &format!("{} — {}", self.beatmap.song.title, self.beatmap.song.artist),
             progress,
             difficulty: &self.beatmap.difficulty.to_string().to_uppercase(),
+            total_notes: self.beatmap.notes.len() as u32,
         }.render(bot_area, buf);
 
         // Pause overlay

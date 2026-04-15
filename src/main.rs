@@ -30,6 +30,37 @@ const TARGET_FPS: u64 = 60;
 const FRAME_DURATION: Duration = Duration::from_micros(1_000_000 / TARGET_FPS);
 
 fn main() -> Result<()> {
+    // CLI: cascade add <path>
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 3 && args[1] == "add" {
+        let file_path = std::path::PathBuf::from(&args[2]);
+        let songs_dir = Config::cascade_dir().join("songs");
+        let _ = std::fs::create_dir_all(&songs_dir);
+
+        println!("Importing {}...", file_path.display());
+        let song = audio::import::import_local_file(&file_path, &songs_dir)?;
+        println!("Generating beatmaps for {}...", song.title);
+
+        let (samples, sample_rate) = audio::analyzer::decode_audio(&song.audio_path)?;
+        let duration_ms = (samples.len() as f64 / sample_rate as f64 * 1000.0) as u64;
+        let audio_filename = song.audio_path.file_name()
+            .unwrap_or_default().to_string_lossy().to_string();
+        let meta = beatmap::types::SongMeta {
+            title: song.title.clone(),
+            artist: String::new(),
+            audio_file: audio_filename,
+            bpm: 120,
+            duration_ms,
+        };
+        let beatmaps = beatmap::generator::generate_all_beatmaps(&samples, sample_rate, meta);
+        for bm in &beatmaps {
+            let path = song.dir.join(bm.difficulty.filename());
+            let _ = beatmap::loader::save(bm, &path);
+        }
+        println!("Successfully imported: {}", song.title);
+        return Ok(());
+    }
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -336,7 +367,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                 Screen::Menu => menu.render(frame, area),
                 Screen::SongSelect => song_select.render(frame, area),
                 Screen::Gameplay => {
-                    if let Some(gp) = &gameplay {
+                    if let Some(gp) = &mut gameplay {
                         gp.render(frame, area);
                     }
                 }
