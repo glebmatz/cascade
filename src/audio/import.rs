@@ -27,16 +27,23 @@ async fn ensure_ytdlp(cascade_dir: &Path) -> Result<PathBuf> {
     let bin_dir = cascade_dir.join("bin");
     std::fs::create_dir_all(&bin_dir)?;
 
+    // Also check if yt-dlp is already in PATH
+    if let Ok(output) = tokio::process::Command::new("yt-dlp").arg("--version").output().await {
+        if output.status.success() {
+            return Ok(PathBuf::from("yt-dlp"));
+        }
+    }
+
     #[cfg(target_os = "macos")]
     let (filename, dl_url) = {
-        let arch = if cfg!(target_arch = "aarch64") { "macos_legacy" } else { "macos" };
-        ("yt-dlp", format!("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_{}", arch))
+        // macos = universal binary (arm64+x86_64), macos_legacy = old x86_64 only
+        ("yt-dlp", "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos".to_string())
     };
 
     #[cfg(target_os = "linux")]
     let (filename, dl_url) = (
         "yt-dlp",
-        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp".to_string(),
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux".to_string(),
     );
 
     #[cfg(target_os = "windows")]
@@ -51,19 +58,28 @@ async fn ensure_ytdlp(cascade_dir: &Path) -> Result<PathBuf> {
         return Ok(ytdlp_path);
     }
 
-    // Download yt-dlp
-    let client = reqwest::Client::new();
+    // Download yt-dlp binary from GitHub releases
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .context("Failed to create HTTP client")?;
+
     let response = client.get(&dl_url)
+        .header("User-Agent", "cascade-game/0.1")
         .send()
         .await
-        .context("Failed to download yt-dlp")?;
+        .map_err(|e| anyhow::anyhow!("Download yt-dlp failed: {} (url: {})", e, dl_url))?;
 
     if !response.status().is_success() {
-        anyhow::bail!("Failed to download yt-dlp: HTTP {}", response.status());
+        anyhow::bail!("Download yt-dlp failed: HTTP {} from {}", response.status(), dl_url);
     }
 
     let bytes = response.bytes().await
-        .context("Failed to read yt-dlp download")?;
+        .context("Failed to read yt-dlp download body")?;
+
+    if bytes.len() < 1000 {
+        anyhow::bail!("Downloaded yt-dlp is too small ({}b) — likely an error page", bytes.len());
+    }
 
     std::fs::write(&ytdlp_path, &bytes)
         .context("Failed to write yt-dlp binary")?;
