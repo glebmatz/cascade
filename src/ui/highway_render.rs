@@ -38,19 +38,10 @@ impl<'a> HighwayWidget<'a> {
         (center_x + lane_offset * spacing) as u16
     }
 
-    /// Note width based on distance (wider when closer)
-    fn note_width(position: f64) -> usize {
-        if position > 0.75 { 1 }
-        else if position > 0.5 { 3 }
-        else if position > 0.25 { 5 }
-        else { 5 }
-    }
-
     fn note_str(position: f64) -> &'static str {
-        if position > 0.75 { "o" }
-        else if position > 0.5 { "<o>" }
-        else if position > 0.25 { "<< >>" }
-        else { "<<o>>" }
+        if position > 0.7 { "+" }
+        else if position > 0.4 { "=*=" }
+        else { "=[#]=" }
     }
 
     fn note_style(position: f64) -> Style {

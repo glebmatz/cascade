@@ -231,7 +231,7 @@ impl GameplayScreen {
         }
 
         // Middle: side visualizers + highway
-        let side_width = (mid_area.width / 5).max(3);
+        let side_width = 2u16; // thin side accent
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
