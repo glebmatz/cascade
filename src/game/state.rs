@@ -9,6 +9,7 @@ pub struct GameState {
     pub max_possible_points: u64,
     pub last_judgement: Option<Judgement>,
     pub judgement_counts: [u32; 4],
+    pub health: f64,
 }
 
 impl GameState {
@@ -22,13 +23,27 @@ impl GameState {
             max_possible_points: 0,
             last_judgement: None,
             judgement_counts: [0; 4],
+            health: 1.0,
         }
+    }
+
+    pub fn is_dead(&self) -> bool {
+        self.health <= 0.0
     }
 
     pub fn register_judgement(&mut self, judgement: Judgement) {
         self.total_notes += 1;
         self.max_possible_points += Judgement::max_points();
         self.last_judgement = Some(judgement);
+
+        // Update health based on judgement
+        let health_delta = match judgement {
+            Judgement::Perfect => 0.02,
+            Judgement::Great => 0.01,
+            Judgement::Good => 0.0,
+            Judgement::Miss => -0.08,
+        };
+        self.health = (self.health + health_delta).clamp(0.0, 1.0);
 
         let idx = match judgement {
             Judgement::Perfect => 0,

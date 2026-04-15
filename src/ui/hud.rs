@@ -12,6 +12,29 @@ impl<'a> Widget for HudTop<'a> {
 
         let cx = area.x + area.width / 2;
 
+        // Health bar: left side
+        let bar_width = 12u16.min(area.width / 4);
+        let bar_x = area.x + 1;
+        let filled = (self.state.health * bar_width as f64) as u16;
+        let hp_color = if self.state.health > 0.5 {
+            Color::Rgb(80, 200, 80)   // green
+        } else if self.state.health >= 0.25 {
+            Color::Rgb(200, 200, 60)  // yellow
+        } else {
+            Color::Rgb(200, 60, 60)   // red
+        };
+        buf.set_string(bar_x, area.y, "[", Style::default().fg(Color::Rgb(100, 100, 100)));
+        for i in 0..bar_width {
+            let ch = if i < filled { " " } else { " " };
+            let style = if i < filled {
+                Style::default().bg(hp_color)
+            } else {
+                Style::default().bg(Color::Rgb(30, 30, 30))
+            };
+            buf.set_string(bar_x + 1 + i, area.y, ch, style);
+        }
+        buf.set_string(bar_x + 1 + bar_width, area.y, "]", Style::default().fg(Color::Rgb(100, 100, 100)));
+
         // Combo: left of center
         if self.state.combo > 1 {
             let combo_text = format!("x{} COMBO", self.state.combo);
@@ -34,6 +57,7 @@ pub struct HudBottom<'a> {
     pub song_title: &'a str,
     pub progress: f64,
     pub difficulty: &'a str,
+    pub total_notes: u32,
 }
 
 impl<'a> Widget for HudBottom<'a> {
@@ -45,6 +69,12 @@ impl<'a> Widget for HudBottom<'a> {
         let truncated: String = info.chars().take((area.width / 2) as usize).collect();
         buf.set_string(area.x, area.y, &truncated,
             Style::default().fg(Color::Rgb(60, 60, 60)));
+
+        // Note counter
+        let note_counter = format!("{}/{}", self.state.total_notes, self.total_notes);
+        let nc_x = area.x + area.width / 2 - note_counter.len() as u16 - 2;
+        buf.set_string(nc_x, area.y, &note_counter,
+            Style::default().fg(Color::Rgb(80, 80, 80)));
 
         let acc = format!("ACC {:.1}%  {}", self.state.accuracy(), self.difficulty);
         let acc_x = area.x + area.width / 2;

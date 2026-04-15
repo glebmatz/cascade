@@ -20,6 +20,8 @@ pub struct HighwayWidget<'a> {
     pub hit_flash: [u8; LANE_COUNT],
     pub last_judgement: Option<Judgement>,
     pub judgement_timer: u8,
+    pub particles: &'a [(u16, u16, u8)],
+    pub energy: f32,
 }
 
 impl<'a> HighwayWidget<'a> {
@@ -30,6 +32,8 @@ impl<'a> HighwayWidget<'a> {
             hit_flash: [0; LANE_COUNT],
             last_judgement: None,
             judgement_timer: 0,
+            particles: &[],
+            energy: 0.0,
         }
     }
 
@@ -41,6 +45,16 @@ impl<'a> HighwayWidget<'a> {
     pub fn with_judgement(mut self, judgement: Option<Judgement>, timer: u8) -> Self {
         self.last_judgement = judgement;
         self.judgement_timer = timer;
+        self
+    }
+
+    pub fn with_particles(mut self, particles: &'a [(u16, u16, u8)]) -> Self {
+        self.particles = particles;
+        self
+    }
+
+    pub fn with_energy(mut self, energy: f32) -> Self {
+        self.energy = energy;
         self
     }
 
@@ -79,10 +93,12 @@ impl<'a> Widget for HighwayWidget<'a> {
                 let (cr, cg, cb) = LANE_COLORS[lane];
 
                 // Very subtle background: brighter at bottom, dimmer at top
-                let intensity = (t * 0.12 + 0.03) as f32;
-                let bg_r = (cr as f32 * intensity).min(30.0) as u8;
-                let bg_g = (cg as f32 * intensity).min(30.0) as u8;
-                let bg_b = (cb as f32 * intensity).min(30.0) as u8;
+                // Pulse with energy from spectrum analyzer
+                let energy_mult = 1.0 + self.energy * 0.3;
+                let intensity = (t * 0.12 + 0.03) as f32 * energy_mult;
+                let bg_r = (cr as f32 * intensity).min(50.0) as u8;
+                let bg_g = (cg as f32 * intensity).min(50.0) as u8;
+                let bg_b = (cb as f32 * intensity).min(50.0) as u8;
 
                 for x in lx..lx + lw {
                     if x < area.x + area.width {
@@ -193,6 +209,16 @@ impl<'a> Widget for HighwayWidget<'a> {
                     buf.set_string(label_x, hit_y, label,
                         Style::default().fg(Color::Rgb(cr / 2, cg / 2, cb / 2)).bg(Color::Rgb(r, g, b)));
                 }
+            }
+        }
+
+        // Draw particles
+        for &(px, py, lifetime) in self.particles {
+            if px >= area.x && px < area.x + area.width && py >= area.y && py < area.y + area.height {
+                let brightness = (lifetime as f32 / 10.0 * 255.0).min(255.0) as u8;
+                let ch = if lifetime > 5 { "*" } else { "'" };
+                buf.set_string(px, py, ch,
+                    Style::default().fg(Color::Rgb(brightness, brightness, (brightness as f32 * 0.7) as u8)));
             }
         }
 
