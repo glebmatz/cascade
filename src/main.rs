@@ -91,45 +91,43 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                             song_select.import_input.clear();
 
                             if !url.is_empty() {
-                                song_select.import_status = Some("Downloading...".to_string());
+                                let file_path = std::path::PathBuf::from(url.trim());
 
-                                // Render progress
+                                song_select.import_status = Some("Importing...".to_string());
                                 terminal.draw(|frame| {
                                     song_select.render(frame, frame.area());
                                 })?;
 
-                                // Sync import
-                                let rt = tokio::runtime::Runtime::new()?;
-                                match rt.block_on(audio::import::download_audio(&url, &songs_dir)) {
-                                    Ok(imported) => {
-                                        for song in &imported {
-                                            song_select.import_status = Some(format!("Generating beatmaps for {}...", song.title));
-                                            terminal.draw(|frame| {
-                                                song_select.render(frame, frame.area());
-                                            })?;
+                                match audio::import::import_local_file(&file_path, &songs_dir) {
+                                    Ok(song) => {
+                                        song_select.import_status = Some(format!("Generating beatmaps for {}...", song.title));
+                                        terminal.draw(|frame| {
+                                            song_select.render(frame, frame.area());
+                                        })?;
 
-                                            match audio::analyzer::decode_audio(&song.audio_path) {
-                                                Ok((samples, sample_rate)) => {
-                                                    let duration_ms = (samples.len() as f64 / sample_rate as f64 * 1000.0) as u64;
-                                                    let meta = beatmap::types::SongMeta {
-                                                        title: song.title.clone(),
-                                                        artist: String::new(),
-                                                        audio_file: "audio.mp3".to_string(),
-                                                        bpm: 120,
-                                                        duration_ms,
-                                                    };
-                                                    let beatmaps = beatmap::generator::generate_all_beatmaps(&samples, sample_rate, meta);
-                                                    for bm in &beatmaps {
-                                                        let path = song.dir.join(bm.difficulty.filename());
-                                                        let _ = beatmap::loader::save(bm, &path);
-                                                    }
+                                        match audio::analyzer::decode_audio(&song.audio_path) {
+                                            Ok((samples, sample_rate)) => {
+                                                let duration_ms = (samples.len() as f64 / sample_rate as f64 * 1000.0) as u64;
+                                                let audio_filename = song.audio_path.file_name()
+                                                    .unwrap_or_default().to_string_lossy().to_string();
+                                                let meta = beatmap::types::SongMeta {
+                                                    title: song.title.clone(),
+                                                    artist: String::new(),
+                                                    audio_file: audio_filename,
+                                                    bpm: 120,
+                                                    duration_ms,
+                                                };
+                                                let beatmaps = beatmap::generator::generate_all_beatmaps(&samples, sample_rate, meta);
+                                                for bm in &beatmaps {
+                                                    let path = song.dir.join(bm.difficulty.filename());
+                                                    let _ = beatmap::loader::save(bm, &path);
                                                 }
-                                                Err(e) => {
-                                                    song_select.import_status = Some(format!("Decode error: {}", e));
-                                                }
+                                                song_select.import_status = Some(format!("Imported: {}", song.title));
+                                            }
+                                            Err(e) => {
+                                                song_select.import_status = Some(format!("Decode error: {}", e));
                                             }
                                         }
-                                        song_select.import_status = Some(format!("Imported {} song(s)!", imported.len()));
                                         song_select.scan_songs(&songs_dir);
                                     }
                                     Err(e) => {
