@@ -30,6 +30,7 @@ pub struct GameplayScreen {
     pub sample_rate: u32,
     pub particles: Vec<(u16, u16, u8)>,
     pub last_render_area: Option<Rect>,
+    pub health_enabled: bool,
 }
 
 impl GameplayScreen {
@@ -41,6 +42,7 @@ impl GameplayScreen {
         offset_ms: i32,
         scroll_speed: f64,
         volume: f64,
+        health_enabled: bool,
     ) -> Result<Self> {
         let mut audio = AudioPlayer::new()?;
         audio.load(audio_path)?;
@@ -64,6 +66,7 @@ impl GameplayScreen {
             sample_rate,
             particles: Vec::new(),
             last_render_area: None,
+            health_enabled,
             beatmap,
             audio,
         })
@@ -152,7 +155,7 @@ impl GameplayScreen {
         if self.audio.is_finished() || (current_ms > self.beatmap.song.duration_ms + 2000) {
             self.finished = true;
         }
-        if self.state.is_dead() {
+        if self.health_enabled && self.state.is_dead() {
             self.finished = true;
         }
     }
@@ -251,7 +254,7 @@ impl GameplayScreen {
         let bot_area = vertical[2];
 
         // Top HUD: combo left, score right
-        HudTop { state: &self.state }.render(top_area, buf);
+        HudTop { state: &self.state, health_enabled: self.health_enabled }.render(top_area, buf);
 
         // Highway — full width, no side panels
         HighwayWidget::new(&self.highway.visible_notes)

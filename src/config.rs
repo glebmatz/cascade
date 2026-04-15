@@ -14,7 +14,11 @@ pub struct Config {
 pub struct GameplayConfig {
     pub scroll_speed: f64,
     pub difficulty: String,
+    #[serde(default = "default_true")]
+    pub health_enabled: bool,
 }
+
+fn default_true() -> bool { true }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeysConfig {
@@ -38,6 +42,7 @@ impl Default for Config {
             gameplay: GameplayConfig {
                 scroll_speed: 1.0,
                 difficulty: "hard".to_string(),
+                health_enabled: true,
             },
             keys: KeysConfig {
                 lanes: ['d', 'f', ' ', 'j', 'k'],
