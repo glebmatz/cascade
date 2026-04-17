@@ -476,8 +476,10 @@ impl SongSelectScreen {
 
     fn practice_looks_like_default(&self) -> bool {
         let start_zero = self.practice.section_start_ms == Some(0);
-        let end_at_duration = match (self.practice.section_end_ms, self.selected_song_duration_ms())
-        {
+        let end_at_duration = match (
+            self.practice.section_end_ms,
+            self.selected_song_duration_ms(),
+        ) {
             (Some(end), Some(dur)) => end >= dur,
             _ => false,
         };
@@ -541,11 +543,7 @@ impl SongSelectScreen {
                 self.practice.section_start_ms = Some(next);
             }
             PracticeField::End => {
-                let cur = self
-                    .practice
-                    .section_end_ms
-                    .or(duration)
-                    .unwrap_or(0) as i64;
+                let cur = self.practice.section_end_ms.or(duration).unwrap_or(0) as i64;
                 let lower = self
                     .practice
                     .section_start_ms
@@ -954,56 +952,47 @@ impl SongSelectScreen {
             .section_end_ms
             .or(self.selected_song_duration_ms())
             .unwrap_or(0);
-        let field_row = |buf: &mut Buffer,
-                         row: u16,
-                         label: &str,
-                         value: String,
-                         focused: bool,
-                         hint: &str| {
-            let label_color = Color::Rgb(160, 160, 180);
-            let (value_color, bracket_color) = if focused {
-                (Color::White, Color::Rgb(255, 200, 120))
-            } else {
-                (Color::Rgb(180, 180, 180), Color::Rgb(90, 90, 100))
+        let field_row =
+            |buf: &mut Buffer, row: u16, label: &str, value: String, focused: bool, hint: &str| {
+                let label_color = Color::Rgb(160, 160, 180);
+                let (value_color, bracket_color) = if focused {
+                    (Color::White, Color::Rgb(255, 200, 120))
+                } else {
+                    (Color::Rgb(180, 180, 180), Color::Rgb(90, 90, 100))
+                };
+                buf.set_string(
+                    x + 4,
+                    row,
+                    label,
+                    Style::default().fg(label_color).bg(bg).bold(),
+                );
+                buf.set_string(x + 14, row, "[", Style::default().fg(bracket_color).bg(bg));
+                buf.set_string(
+                    x + 15,
+                    row,
+                    &value,
+                    Style::default().fg(value_color).bg(bg).bold(),
+                );
+                let close_x = x + 15 + value.chars().count() as u16;
+                buf.set_string(close_x, row, "]", Style::default().fg(bracket_color).bg(bg));
+                if focused {
+                    buf.set_string(
+                        x + 2,
+                        row,
+                        "▸",
+                        Style::default().fg(Color::Rgb(255, 200, 120)).bg(bg).bold(),
+                    );
+                }
+                let hint_x = close_x + 2;
+                if hint_x + hint.chars().count() as u16 + 2 < x + w {
+                    buf.set_string(
+                        hint_x,
+                        row,
+                        hint,
+                        Style::default().fg(Color::Rgb(110, 110, 120)).bg(bg),
+                    );
+                }
             };
-            buf.set_string(
-                x + 4,
-                row,
-                label,
-                Style::default().fg(label_color).bg(bg).bold(),
-            );
-            buf.set_string(
-                x + 14,
-                row,
-                "[",
-                Style::default().fg(bracket_color).bg(bg),
-            );
-            buf.set_string(
-                x + 15,
-                row,
-                &value,
-                Style::default().fg(value_color).bg(bg).bold(),
-            );
-            let close_x = x + 15 + value.chars().count() as u16;
-            buf.set_string(close_x, row, "]", Style::default().fg(bracket_color).bg(bg));
-            if focused {
-                buf.set_string(
-                    x + 2,
-                    row,
-                    "▸",
-                    Style::default().fg(Color::Rgb(255, 200, 120)).bg(bg).bold(),
-                );
-            }
-            let hint_x = close_x + 2;
-            if hint_x + hint.chars().count() as u16 + 2 < x + w {
-                buf.set_string(
-                    hint_x,
-                    row,
-                    hint,
-                    Style::default().fg(Color::Rgb(110, 110, 120)).bg(bg),
-                );
-            }
-        };
 
         let start_value = if matches!(self.practice_focus, PracticeField::Start) {
             format_typed_mmss(&self.practice_buf, true)
@@ -1051,7 +1040,10 @@ impl SongSelectScreen {
         } else if self.practice.is_active() {
             ("✓ practice active", Color::Rgb(120, 220, 140))
         } else {
-            ("practice inactive (full song, no speed change)", Color::Rgb(110, 110, 120))
+            (
+                "practice inactive (full song, no speed change)",
+                Color::Rgb(110, 110, 120),
+            )
         };
         let sw = status.0.chars().count() as u16;
         buf.set_string(

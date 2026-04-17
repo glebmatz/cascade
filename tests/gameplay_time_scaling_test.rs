@@ -16,9 +16,9 @@ fn gameplay_only_uses_position_via_helper() {
         .collect();
 
     // The only legal call site is inside the helper itself.
-    let helper_ok = raw_uses.iter().any(|(_, line)| {
-        line.contains("self.audio.position_ms() as f64 * self.speed as f64")
-    });
+    let helper_ok = raw_uses
+        .iter()
+        .any(|(_, line)| line.contains("self.audio.position_ms() as f64 * self.speed as f64"));
     assert!(
         helper_ok,
         "position_ms_in_track helper must exist and reference self.audio.position_ms()"
@@ -26,9 +26,7 @@ fn gameplay_only_uses_position_via_helper() {
 
     let leaked: Vec<_> = raw_uses
         .iter()
-        .filter(|(_, line)| {
-            !line.contains("self.audio.position_ms() as f64 * self.speed as f64")
-        })
+        .filter(|(_, line)| !line.contains("self.audio.position_ms() as f64 * self.speed as f64"))
         .collect();
     assert!(
         leaked.is_empty(),
