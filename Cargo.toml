@@ -1,7 +1,26 @@
 [package]
-name = "cascade"
+name = "cascade-rhythm"
 version = "0.1.0"
 edition = "2024"
+description = "Terminal rhythm game with automatic beatmap generation from any audio file"
+repository = "https://github.com/glebmatz/cascade"
+homepage = "https://github.com/glebmatz/cascade"
+documentation = "https://github.com/glebmatz/cascade#readme"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["rhythm", "game", "tui", "terminal", "music"]
+categories = ["games", "command-line-utilities"]
+authors = ["Gleb Matsko"]
+exclude = ["docs/", ".github/", ".claude/", ".superpowers/"]
+
+# Binary is installed as `cascade` even though the crate is `cascade-rhythm`.
+[[bin]]
+name = "cascade"
+path = "src/main.rs"
+
+[lib]
+name = "cascade"
+path = "src/lib.rs"
 
 [dependencies]
 ratatui = "0.29"
@@ -17,3 +36,30 @@ dirs = "6"
 
 [dev-dependencies]
 tempfile = "3"
+
+[profile.release]
+# Tighter release binary — better for distribution.
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# --- cargo-binstall: lets `cargo binstall cascade-rhythm` pull prebuilt binaries ---
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+pkg-fmt = "tgz"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
+
+# --- cargo-dist: automated releases. Run `cargo dist init` once to generate workflow ---
+[workspace.metadata.dist]
+cargo-dist-version = "0.25.1"
+ci = "github"
+installers = ["shell", "powershell", "homebrew"]
+tap = "glebmatz/homebrew-cascade"
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+pr-run-mode = "plan"

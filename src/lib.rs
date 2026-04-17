@@ -1,8 +1,15 @@
+// Lints we deliberately allow project-wide.
+#![allow(clippy::needless_range_loop)] // explicit indexing reads better in DSP code
+#![allow(clippy::question_mark)] // some let...else cases are clearer than `?`
+#![allow(clippy::while_let_loop)] // explicit `loop { ... break; }` is fine for codecs
+
 pub mod app;
-pub mod config;
-pub mod input;
-pub mod beatmap;
-pub mod game;
 pub mod audio;
-pub mod ui;
+pub mod beatmap;
+pub mod cli;
+pub mod config;
+pub mod game;
+pub mod input;
+pub mod score_store;
 pub mod screens;
+pub mod ui;

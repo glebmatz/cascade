@@ -1,11 +1,17 @@
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 pub fn slug_from_title(title: &str) -> String {
     title
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -24,17 +30,19 @@ pub fn import_local_file(file_path: &Path, songs_dir: &Path) -> Result<ImportedS
         anyhow::bail!("File not found: {}", file_path.display());
     }
 
-    let ext = file_path.extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     match ext {
         "mp3" | "wav" | "flac" | "ogg" | "m4a" | "webm" | "opus" => {}
-        _ => anyhow::bail!("Unsupported format: .{}. Use mp3, wav, flac, ogg, m4a, opus, or webm.", ext),
+        _ => anyhow::bail!(
+            "Unsupported format: .{}. Use mp3, wav, flac, ogg, m4a, opus, or webm.",
+            ext
+        ),
     }
 
     // Derive song name from filename
-    let stem = file_path.file_stem()
+    let stem = file_path
+        .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown");
 
@@ -45,8 +53,7 @@ pub fn import_local_file(file_path: &Path, songs_dir: &Path) -> Result<ImportedS
     let audio_dest = song_dir.join(format!("audio.{}", ext));
 
     // Copy file
-    std::fs::copy(file_path, &audio_dest)
-        .context("Failed to copy audio file")?;
+    std::fs::copy(file_path, &audio_dest).context("Failed to copy audio file")?;
 
     // Write metadata
     let meta = serde_json::json!({

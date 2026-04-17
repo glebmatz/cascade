@@ -1,20 +1,14 @@
 use anyhow::Result;
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
+use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, buffer::SamplesBuffer};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
 
 pub struct AudioPlayer {
     _stream: OutputStream,
     _stream_handle: OutputStreamHandle,
     sink: Sink,
-    start_time: Option<Instant>,
-    pause_elapsed_ms: u64,
-    position_ms: Arc<AtomicU64>,
-    is_playing: Arc<AtomicBool>,
+    started: bool,
 }
 
 impl AudioPlayer {
@@ -27,70 +21,65 @@ impl AudioPlayer {
             _stream: stream,
             _stream_handle: stream_handle,
             sink,
-            start_time: None,
-            pause_elapsed_ms: 0,
-            position_ms: Arc::new(AtomicU64::new(0)),
-            is_playing: Arc::new(AtomicBool::new(false)),
+            started: false,
         })
     }
 
+    #[allow(dead_code)]
     pub fn load(&mut self, path: &Path) -> Result<()> {
         let file = BufReader::new(File::open(path)?);
         let source = Decoder::new(file)?;
         self.sink.append(source);
         self.sink.pause();
-        self.start_time = None;
-        self.pause_elapsed_ms = 0;
-        self.position_ms.store(0, Ordering::Relaxed);
-        self.is_playing.store(false, Ordering::Relaxed);
+        self.started = false;
+        Ok(())
+    }
+
+    /// Load already-decoded mono samples. Avoids decoding the same file twice
+    /// (once for the analyzer, once for rodio).
+    pub fn load_samples(&mut self, samples: &[f32], sample_rate: u32) -> Result<()> {
+        // SamplesBuffer wants owned Vec and takes `channels` as u16; we pass mono.
+        let buf = SamplesBuffer::new(1, sample_rate, samples.to_vec());
+        self.sink.append(buf);
+        self.sink.pause();
+        self.started = false;
         Ok(())
     }
 
     pub fn play(&mut self) {
         self.sink.play();
-        self.start_time = Some(Instant::now());
-        self.is_playing.store(true, Ordering::Relaxed);
+        self.started = true;
     }
 
     pub fn pause(&mut self) {
-        if self.is_playing.load(Ordering::Relaxed) {
-            self.pause_elapsed_ms = self.position_ms();
-            self.sink.pause();
-            self.start_time = None;
-            self.is_playing.store(false, Ordering::Relaxed);
-        }
+        self.sink.pause();
     }
 
     pub fn resume(&mut self) {
-        if !self.is_playing.load(Ordering::Relaxed) {
-            self.sink.play();
-            self.start_time = Some(Instant::now());
-            self.is_playing.store(true, Ordering::Relaxed);
-        }
+        self.sink.play();
     }
 
     pub fn stop(&mut self) {
         self.sink.stop();
-        self.start_time = None;
-        self.pause_elapsed_ms = 0;
-        self.position_ms.store(0, Ordering::Relaxed);
-        self.is_playing.store(false, Ordering::Relaxed);
+        self.started = false;
     }
 
+    /// Real playback position based on samples actually delivered to the audio device.
+    /// This accounts for buffer latency unlike wall-clock timing.
     pub fn position_ms(&self) -> u64 {
-        if let Some(start) = self.start_time {
-            self.pause_elapsed_ms + start.elapsed().as_millis() as u64
-        } else {
-            self.pause_elapsed_ms
+        if !self.started {
+            return 0;
         }
+        self.sink.get_pos().as_millis() as u64
     }
 
     pub fn update_position(&self) {
-        self.position_ms.store(self.position_ms(), Ordering::Relaxed);
+        // no-op: position is queried directly from sink
     }
 
+    #[allow(dead_code)]
     pub fn is_playing(&self) -> bool {
-        self.is_playing.load(Ordering::Relaxed)
+        !self.sink.is_paused() && self.started
     }
 
     pub fn is_finished(&self) -> bool {
@@ -99,5 +88,15 @@ impl AudioPlayer {
 
     pub fn set_volume(&mut self, volume: f32) {
         self.sink.set_volume(volume);
+    }
+
+    /// Fire-and-forget SFX on a detached sink sharing the same output device.
+    /// Music playback and position are unaffected.
+    pub fn play_sfx(&self, samples: Vec<f32>, sample_rate: u32, volume: f32) {
+        if let Ok(sfx_sink) = Sink::try_new(&self._stream_handle) {
+            sfx_sink.set_volume(volume);
+            sfx_sink.append(SamplesBuffer::new(1, sample_rate, samples));
+            sfx_sink.detach();
+        }
     }
 }

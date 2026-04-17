@@ -1,8 +1,11 @@
-use crossterm::event::{KeyCode, KeyEvent};
 use crate::app::Action;
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-/// Map key in menu context (j/k = navigate)
+/// Map key in menu context (j/k = navigate). Releases and repeats are ignored.
 pub fn map_key_menu(key: KeyEvent) -> Action {
+    if !matches!(key.kind, KeyEventKind::Press) {
+        return Action::None;
+    }
     match key.code {
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Up | KeyCode::Char('k') => Action::MenuUp,
@@ -16,23 +19,35 @@ pub fn map_key_menu(key: KeyEvent) -> Action {
     }
 }
 
-/// Map key in gameplay context (d/f/space/j/k = lanes)
+/// Map key in gameplay context (d/f/space/j/k = lanes). Emits GameKey on press,
+/// GameKeyRelease on release (if the terminal reports release events).
 pub fn map_key_gameplay(key: KeyEvent, lanes: &[char; 5]) -> Action {
-    match key.code {
-        KeyCode::Esc => Action::Pause,
-        KeyCode::Char('q') => Action::Quit,
-        KeyCode::Char(c) => {
-            for (i, &lane_key) in lanes.iter().enumerate() {
-                if c == lane_key {
-                    return Action::GameKey(i);
-                }
-            }
-            Action::None
+    // Ignore auto-repeats so holding a key doesn't fire repeated hits.
+    if matches!(key.kind, KeyEventKind::Repeat) {
+        return Action::None;
+    }
+    let is_release = matches!(key.kind, KeyEventKind::Release);
+
+    // Menu-only keys still act on press.
+    if !is_release {
+        match key.code {
+            KeyCode::Esc => return Action::Pause,
+            KeyCode::Char('q') => return Action::Quit,
+            _ => {}
         }
-        KeyCode::Char(' ') | KeyCode::Backspace => {
-            // Space might not match as Char(' ') in some terminals
-            Action::GameKey(2)
-        }
-        _ => Action::None,
+    } else if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+        return Action::None;
+    }
+
+    let lane_idx = match key.code {
+        KeyCode::Char(c) => lanes.iter().position(|&k| k == c),
+        KeyCode::Backspace => Some(2),
+        _ => None,
+    };
+
+    match (lane_idx, is_release) {
+        (Some(i), false) => Action::GameKey(i),
+        (Some(i), true) => Action::GameKeyRelease(i),
+        (None, _) => Action::None,
     }
 }

@@ -1,3 +1,3 @@
-pub mod types;
-pub mod loader;
 pub mod generator;
+pub mod loader;
+pub mod types;

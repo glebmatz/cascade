@@ -28,16 +28,24 @@ pub enum Difficulty {
 
 impl Difficulty {
     pub fn filename(&self) -> String {
-        format!("{}.json", match self {
-            Difficulty::Easy => "easy",
-            Difficulty::Medium => "medium",
-            Difficulty::Hard => "hard",
-            Difficulty::Expert => "expert",
-        })
+        format!(
+            "{}.json",
+            match self {
+                Difficulty::Easy => "easy",
+                Difficulty::Medium => "medium",
+                Difficulty::Hard => "hard",
+                Difficulty::Expert => "expert",
+            }
+        )
     }
 
     pub fn all() -> &'static [Difficulty] {
-        &[Difficulty::Easy, Difficulty::Medium, Difficulty::Hard, Difficulty::Expert]
+        &[
+            Difficulty::Easy,
+            Difficulty::Medium,
+            Difficulty::Hard,
+            Difficulty::Expert,
+        ]
     }
 }
 

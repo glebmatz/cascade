@@ -1,74 +1,91 @@
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::question_mark)]
+#![allow(clippy::while_let_loop)]
+
 mod app;
-mod config;
-mod input;
-mod beatmap;
-mod game;
 mod audio;
-mod ui;
+mod beatmap;
+mod cli;
+mod config;
+mod game;
+mod input;
+mod score_store;
 mod screens;
+mod ui;
 
 use std::io;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent},
+    event::{
+        self, Event, KeyCode, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
+    },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::prelude::*;
 
-use app::{App, Action, Screen};
+use app::{Action, App, Screen};
+use audio::sfx::{self, SfxPlayer};
+use beatmap::types::Difficulty;
 use config::Config;
-use screens::menu::MenuScreen;
-use screens::song_select::SongSelectScreen;
+use score_store::{BestScore, ScoreStore};
+use screens::calibrate::CalibrateScreen;
 use screens::gameplay::GameplayScreen;
+use screens::menu::MenuScreen;
 use screens::results::ResultsScreen;
 use screens::settings::SettingsScreen;
-use beatmap::types::Difficulty;
+use screens::song_select::SongSelectScreen;
 
 const TARGET_FPS: u64 = 60;
 const FRAME_DURATION: Duration = Duration::from_micros(1_000_000 / TARGET_FPS);
 
 fn main() -> Result<()> {
-    // CLI: cascade add <path>
     let args: Vec<String> = std::env::args().collect();
-    if args.len() >= 3 && args[1] == "add" {
-        let file_path = std::path::PathBuf::from(&args[2]);
-        let songs_dir = Config::cascade_dir().join("songs");
-        let _ = std::fs::create_dir_all(&songs_dir);
 
-        println!("Importing {}...", file_path.display());
-        let song = audio::import::import_local_file(&file_path, &songs_dir)?;
-        println!("Generating beatmaps for {}...", song.title);
-
-        let (samples, sample_rate) = audio::analyzer::decode_audio(&song.audio_path)?;
-        let duration_ms = (samples.len() as f64 / sample_rate as f64 * 1000.0) as u64;
-        let audio_filename = song.audio_path.file_name()
-            .unwrap_or_default().to_string_lossy().to_string();
-        let meta = beatmap::types::SongMeta {
-            title: song.title.clone(),
-            artist: String::new(),
-            audio_file: audio_filename,
-            bpm: 120,
-            duration_ms,
-        };
-        let beatmaps = beatmap::generator::generate_all_beatmaps(&samples, sample_rate, meta);
-        for bm in &beatmaps {
-            let path = song.dir.join(bm.difficulty.filename());
-            let _ = beatmap::loader::save(bm, &path);
+    if args.len() >= 2 {
+        match args[1].as_str() {
+            "add" if args.len() >= 3 => return cli::add(&args[2]),
+            "list" | "ls" => return cli::list(),
+            "regen" => return cli::regen(),
+            "play" if args.len() >= 3 => {
+                let slug = args[2].clone();
+                let difficulty = cli::parse_difficulty_flag(&args[3..]);
+                return run_interactive(Some((slug, difficulty)));
+            }
+            "help" | "--help" | "-h" => return cli::print_help(),
+            _ => {}
         }
-        println!("Successfully imported: {}", song.title);
-        return Ok(());
     }
 
+    run_interactive(None)
+}
+
+fn run_interactive(start_song: Option<(String, Option<Difficulty>)>) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+
+    let kb_enhanced = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                | KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        )
+    )
+    .is_ok();
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run(&mut terminal);
+    let result = run(&mut terminal, start_song);
 
+    if kb_enhanced {
+        let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    }
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -76,320 +93,541 @@ fn main() -> Result<()> {
     if let Err(ref e) = result {
         eprintln!("Error: {}", e);
     }
-
     result
 }
 
-fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-    let config = Config::load(&Config::default_path())?;
-    let songs_dir = Config::cascade_dir().join("songs");
-    let _ = std::fs::create_dir_all(&songs_dir);
+struct Session {
+    config: Config,
+    songs_dir: PathBuf,
+    scores_path: PathBuf,
+    scores: ScoreStore,
+    sfx: Option<SfxPlayer>,
 
-    let mut app = App::new();
+    app: App,
+    menu: MenuScreen,
+    song_select: SongSelectScreen,
+    gameplay: Option<GameplayScreen>,
+    results: Option<ResultsScreen>,
+    settings: Option<SettingsScreen>,
+    calibrate: Option<CalibrateScreen>,
 
-    let mut menu = MenuScreen::new();
-    let mut song_select = SongSelectScreen::new(
-        match config.gameplay.difficulty.as_str() {
+    last_beatmap_path: Option<PathBuf>,
+    last_audio_path: Option<PathBuf>,
+    last_song_title: String,
+}
+
+impl Session {
+    fn load() -> Result<Self> {
+        let config = Config::load(&Config::default_path())?;
+        let songs_dir = Config::cascade_dir().join("songs");
+        std::fs::create_dir_all(&songs_dir)?;
+        let scores_path = Config::cascade_dir().join("scores.json");
+
+        let sfx = SfxPlayer::new((config.audio.volume as f32 * 0.6).clamp(0.0, 1.0)).ok();
+        let scores = ScoreStore::load(&scores_path);
+
+        let initial_difficulty = match config.gameplay.difficulty.as_str() {
             "easy" => Difficulty::Easy,
             "medium" => Difficulty::Medium,
             "expert" => Difficulty::Expert,
             _ => Difficulty::Hard,
+        };
+        let mut song_select = SongSelectScreen::new(initial_difficulty);
+        song_select.load_scores(&scores_path);
+        song_select.scan_songs(&songs_dir);
+
+        Ok(Self {
+            config,
+            songs_dir,
+            scores_path,
+            scores,
+            sfx,
+            app: App::new(),
+            menu: MenuScreen::new(),
+            song_select,
+            gameplay: None,
+            results: None,
+            settings: None,
+            calibrate: None,
+            last_beatmap_path: None,
+            last_audio_path: None,
+            last_song_title: String::new(),
+        })
+    }
+
+    fn record_score(&mut self, gp: &GameplayScreen) -> (Option<BestScore>, bool) {
+        let slug = cli::song_slug_from_path(&self.last_beatmap_path);
+        let diff_name = gp.beatmap.difficulty.to_string();
+        let prev = self.scores.get(&slug, &diff_name).cloned();
+        let new_record = BestScore {
+            score: gp.state.score,
+            max_combo: gp.state.max_combo,
+            accuracy: gp.state.accuracy(),
+            grade: gp.state.grade().to_string(),
+        };
+        let is_best = self.scores.update_if_best(&slug, &diff_name, new_record);
+        if is_best {
+            let _ = self.scores.save(&self.scores_path);
         }
-    );
-    let mut gameplay: Option<GameplayScreen> = None;
-    let mut results: Option<ResultsScreen> = None;
-    let mut settings: Option<SettingsScreen> = None;
+        (prev, is_best)
+    }
 
-    // For retry
-    let mut last_beatmap_path: Option<std::path::PathBuf> = None;
-    let mut last_audio_path: Option<std::path::PathBuf> = None;
-    let mut last_song_title = String::new();
+    fn finalize_to_results(&mut self) {
+        let Some(gp) = self.gameplay.take() else {
+            return;
+        };
+        let (prev_best, is_best) = self.record_score(&gp);
+        let diff_name = gp.beatmap.difficulty.to_string();
+        self.results = Some(ResultsScreen::new(
+            gp.state,
+            self.last_song_title.clone(),
+            diff_name,
+            prev_best,
+            is_best,
+        ));
+    }
 
-    while app.running {
+    fn play_nav_sfx(&self, action: Action) {
+        let Some(sfx) = &self.sfx else { return };
+        if self.app.screen == Screen::Gameplay {
+            return;
+        }
+        match action {
+            Action::MenuUp | Action::MenuDown | Action::Tab => sfx.play(sfx::nav_tick()),
+            Action::MenuSelect => sfx.play(sfx::nav_select()),
+            Action::Back | Action::Pause | Action::Quit => sfx.play(sfx::nav_back()),
+            _ => {}
+        }
+    }
+
+    fn launch_gameplay_from_song_select(&mut self) -> Result<bool> {
+        let from_song_select = self.app.screen == Screen::SongSelect;
+        let beatmap_path = if from_song_select {
+            self.song_select.selected_beatmap_path()
+        } else {
+            self.last_beatmap_path
+                .clone()
+                .or_else(|| self.song_select.selected_beatmap_path())
+        };
+        let audio_path = if from_song_select {
+            self.song_select.selected_audio_path()
+        } else {
+            self.last_audio_path
+                .clone()
+                .or_else(|| self.song_select.selected_audio_path())
+        };
+
+        let (Some(bp), Some(ap)) = (beatmap_path, audio_path) else {
+            return Ok(false);
+        };
+        if !bp.exists() || !ap.exists() {
+            self.song_select.import_status = Some("Beatmap or audio file not found".to_string());
+            return Ok(false);
+        }
+
+        let bm = match beatmap::loader::load(&bp) {
+            Ok(bm) => bm,
+            Err(e) => {
+                self.song_select.import_status = Some(format!("Beatmap error: {}", e));
+                return Ok(false);
+            }
+        };
+
+        self.last_song_title = self.song_select.selected_song_title();
+        self.last_beatmap_path = Some(bp);
+        self.last_audio_path = Some(ap.clone());
+
+        let (samples, sample_rate) =
+            audio::analyzer::decode_audio(&ap).unwrap_or_else(|_| (vec![], 44100));
+
+        let mut gp = GameplayScreen::new(
+            bm,
+            &ap,
+            samples,
+            sample_rate,
+            self.config.audio.offset_ms,
+            self.config.gameplay.scroll_speed,
+            self.config.audio.volume,
+            self.config.gameplay.health_enabled,
+            self.config.gameplay.holds_enabled,
+        )?;
+        gp.start();
+        self.gameplay = Some(gp);
+        Ok(true)
+    }
+}
+
+fn run(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    start_song: Option<(String, Option<Difficulty>)>,
+) -> Result<()> {
+    let mut session = Session::load()?;
+
+    if let Some((slug, diff)) = start_song {
+        match session
+            .song_select
+            .songs
+            .iter()
+            .position(|s| s.slug == slug)
+        {
+            Some(i) => {
+                if let Some(d) = diff {
+                    session.song_select.difficulty = d;
+                }
+                session.song_select.selected = session
+                    .song_select
+                    .filtered_indices
+                    .iter()
+                    .position(|&fi| fi == i)
+                    .unwrap_or(0);
+                session.app.navigate(Screen::SongSelect);
+                if !session.launch_gameplay_from_song_select()? {
+                    eprintln!(
+                        "Beatmap file missing for difficulty {}.",
+                        session.song_select.difficulty
+                    );
+                    return Ok(());
+                }
+                session.app.navigate(Screen::Gameplay);
+            }
+            None => {
+                eprintln!("Song '{}' not found. Use `cascade list`.", slug);
+                return Ok(());
+            }
+        }
+    }
+
+    while session.app.running {
         let frame_start = Instant::now();
-
-        // Input
-        if event::poll(Duration::from_millis(1))? {
-            if let Event::Key(key) = event::read()? {
-                // Handle import mode text input
-                if app.screen == Screen::SongSelect && song_select.import_mode {
-                    match key.code {
-                        KeyCode::Char(c) => { song_select.import_input.push(c); }
-                        KeyCode::Backspace => { song_select.import_input.pop(); }
-                        KeyCode::Enter => {
-                            let url = song_select.import_input.clone();
-                            song_select.import_mode = false;
-                            song_select.import_input.clear();
-
-                            if !url.is_empty() {
-                                let file_path = std::path::PathBuf::from(url.trim());
-
-                                song_select.import_status = Some("Importing...".to_string());
-                                terminal.draw(|frame| {
-                                    song_select.render(frame, frame.area());
-                                })?;
-
-                                match audio::import::import_local_file(&file_path, &songs_dir) {
-                                    Ok(song) => {
-                                        song_select.import_status = Some(format!("Generating beatmaps for {}...", song.title));
-                                        terminal.draw(|frame| {
-                                            song_select.render(frame, frame.area());
-                                        })?;
-
-                                        match audio::analyzer::decode_audio(&song.audio_path) {
-                                            Ok((samples, sample_rate)) => {
-                                                let duration_ms = (samples.len() as f64 / sample_rate as f64 * 1000.0) as u64;
-                                                let audio_filename = song.audio_path.file_name()
-                                                    .unwrap_or_default().to_string_lossy().to_string();
-                                                let meta = beatmap::types::SongMeta {
-                                                    title: song.title.clone(),
-                                                    artist: String::new(),
-                                                    audio_file: audio_filename,
-                                                    bpm: 120,
-                                                    duration_ms,
-                                                };
-                                                let beatmaps = beatmap::generator::generate_all_beatmaps(&samples, sample_rate, meta);
-                                                for bm in &beatmaps {
-                                                    let path = song.dir.join(bm.difficulty.filename());
-                                                    let _ = beatmap::loader::save(bm, &path);
-                                                }
-                                                song_select.import_status = Some(format!("Imported: {}", song.title));
-                                            }
-                                            Err(e) => {
-                                                song_select.import_status = Some(format!("Decode error: {}", e));
-                                            }
-                                        }
-                                        song_select.scan_songs(&songs_dir);
-                                    }
-                                    Err(e) => {
-                                        song_select.import_status = Some(format!("Error: {}", e));
-                                    }
-                                }
-                            }
-                        }
-                        KeyCode::Esc => {
-                            song_select.import_mode = false;
-                            song_select.import_input.clear();
-                        }
-                        _ => {}
-                    }
-                } else {
-                    // Use context-aware key mapping
-                    let action = match app.screen {
-                        Screen::Gameplay => input::map_key_gameplay(key, &config.keys.lanes),
-                        Screen::Settings => {
-                            // Settings needs both menu nav AND game keys for value adjustment
-                            let menu_action = input::map_key_menu(key);
-                            if menu_action == Action::None {
-                                input::map_key_gameplay(key, &config.keys.lanes)
-                            } else {
-                                menu_action
-                            }
-                        }
-                        _ => input::map_key_menu(key),
-                    };
-
-                    let result_action = match app.screen {
-                        Screen::Menu => {
-                            if action == Action::Quit {
-                                Some(Action::Quit)
-                            } else {
-                                menu.handle_action(action)
-                            }
-                        }
-                        Screen::SongSelect => {
-                            if action == Action::Import {
-                                song_select.import_mode = true;
-                                song_select.import_input.clear();
-                                None
-                            } else if action == Action::Quit {
-                                Some(Action::Navigate(Screen::Menu))
-                            } else {
-                                song_select.handle_action(action)
-                            }
-                        }
-                        Screen::Gameplay => {
-                            if let Some(gp) = &mut gameplay {
-                                gp.handle_action(action)
-                            } else {
-                                None
-                            }
-                        }
-                        Screen::Results => {
-                            if let Some(rs) = &mut results {
-                                rs.handle_action(action)
-                            } else {
-                                None
-                            }
-                        }
-                        Screen::Settings => {
-                            if let Some(st) = &mut settings {
-                                if action == Action::Quit {
-                                    Some(Action::Navigate(Screen::Menu))
-                                } else {
-                                    st.handle_action(action)
-                                }
-                            } else {
-                                None
-                            }
-                        }
-                    };
-
-                    if let Some(ra) = result_action {
-                        match ra {
-                            Action::Quit => app.quit(),
-                            Action::Navigate(screen) => {
-                                // Transition logic
-                                match screen {
-                                    Screen::SongSelect => {
-                                        song_select.scan_songs(&songs_dir);
-                                        gameplay = None;
-                                    }
-                                    Screen::Gameplay => {
-                                        // Load beatmap: fresh selection from song_select, or retry from last
-                                        let from_song_select = app.screen == Screen::SongSelect;
-                                        let beatmap_path = if from_song_select {
-                                            song_select.selected_beatmap_path()
-                                        } else {
-                                            last_beatmap_path.clone().or_else(|| song_select.selected_beatmap_path())
-                                        };
-                                        let audio_path = if from_song_select {
-                                            song_select.selected_audio_path()
-                                        } else {
-                                            last_audio_path.clone().or_else(|| song_select.selected_audio_path())
-                                        };
-
-                                        if let (Some(bp), Some(ap)) = (beatmap_path, audio_path) {
-                                            if bp.exists() && ap.exists() {
-                                                // Show loading screen
-                                                terminal.draw(|frame| {
-                                                    let area = frame.area();
-                                                    let buf = frame.buffer_mut();
-                                                    let msg = "Loading...";
-                                                    let x = area.x + (area.width.saturating_sub(msg.len() as u16)) / 2;
-                                                    let y = area.y + area.height / 2;
-                                                    buf.set_string(x, y, msg, Style::default().fg(Color::Rgb(140, 140, 140)));
-                                                })?;
-
-                                                match beatmap::loader::load(&bp) {
-                                                    Ok(bm) => {
-                                                        last_song_title = song_select.selected_song_title();
-                                                        last_beatmap_path = Some(bp);
-                                                        last_audio_path = Some(ap.clone());
-
-                                                        // Decode for visualizer
-                                                        let (samples, sample_rate) = audio::analyzer::decode_audio(&ap)
-                                                            .unwrap_or_else(|_| (vec![], 44100));
-
-                                                        match GameplayScreen::new(
-                                                            bm,
-                                                            &ap,
-                                                            samples,
-                                                            sample_rate,
-                                                            config.audio.offset_ms,
-                                                            config.gameplay.scroll_speed,
-                                                            config.audio.volume,
-                                                            config.gameplay.health_enabled,
-                                                        ) {
-                                                            Ok(mut gp) => {
-                                                                gp.start();
-                                                                gameplay = Some(gp);
-                                                            }
-                                                            Err(e) => {
-                                                                song_select.import_status = Some(format!("Audio error: {}", e));
-                                                                app.navigate(Screen::SongSelect);
-                                                                continue;
-                                                            }
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        song_select.import_status = Some(format!("Beatmap error: {}", e));
-                                                        app.navigate(Screen::SongSelect);
-                                                        continue;
-                                                    }
-                                                }
-                                            } else {
-                                                song_select.import_status = Some("Beatmap or audio file not found".to_string());
-                                                app.navigate(Screen::SongSelect);
-                                                continue;
-                                            }
-                                        } else {
-                                            app.navigate(Screen::SongSelect);
-                                            continue;
-                                        }
-                                    }
-                                    Screen::Results => {
-                                        if let Some(gp) = gameplay.take() {
-                                            results = Some(ResultsScreen::new(
-                                                gp.state,
-                                                last_song_title.clone(),
-                                                gp.beatmap.difficulty.to_string(),
-                                            ));
-                                        }
-                                    }
-                                    Screen::Settings => {
-                                        let cfg = Config::load(&Config::default_path()).unwrap_or_default();
-                                        settings = Some(SettingsScreen::new(cfg));
-                                    }
-                                    Screen::Menu => {
-                                        last_beatmap_path = None;
-                                        last_audio_path = None;
-                                    }
-                                }
-                                app.navigate(screen);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-
-        // Update
-        if app.screen == Screen::Gameplay {
-            if let Some(gp) = &mut gameplay {
-                gp.update();
-                if gp.finished {
-                    let gp = gameplay.take().unwrap();
-                    results = Some(ResultsScreen::new(
-                        gp.state,
-                        last_song_title.clone(),
-                        gp.beatmap.difficulty.to_string(),
-                    ));
-                    app.navigate(Screen::Results);
-                }
-            }
-        }
-
-        // Render
-        terminal.draw(|frame| {
-            let area = frame.area();
-            match app.screen {
-                Screen::Menu => menu.render(frame, area),
-                Screen::SongSelect => song_select.render(frame, area),
-                Screen::Gameplay => {
-                    if let Some(gp) = &mut gameplay {
-                        gp.render(frame, area);
-                    }
-                }
-                Screen::Results => {
-                    if let Some(rs) = &results {
-                        rs.render(frame, area);
-                    }
-                }
-                Screen::Settings => {
-                    if let Some(st) = &settings {
-                        st.render(frame, area);
-                    }
-                }
-            }
-        })?;
+        process_input(&mut session, terminal)?;
+        update(&mut session, terminal);
+        draw(&mut session, terminal)?;
 
         let elapsed = frame_start.elapsed();
         if elapsed < FRAME_DURATION {
             std::thread::sleep(FRAME_DURATION - elapsed);
         }
     }
+    Ok(())
+}
 
+fn process_input(
+    session: &mut Session,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
+    let mut event_budget = 16;
+    while event_budget > 0 && event::poll(Duration::from_millis(0))? {
+        event_budget -= 1;
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if !matches!(key.kind, KeyEventKind::Press) && session.app.screen != Screen::Gameplay {
+            continue;
+        }
+
+        if session.app.screen == Screen::SongSelect
+            && session.song_select.search_mode
+            && session.song_select.handle_search_key(key.code)
+        {
+            continue;
+        }
+        if session.app.screen == Screen::SongSelect
+            && !session.song_select.import_mode
+            && !session.song_select.search_mode
+            && key.code == KeyCode::Char('/')
+        {
+            session.song_select.search_mode = true;
+            continue;
+        }
+        if session.app.screen == Screen::SongSelect && session.song_select.import_mode {
+            handle_import_input(session, terminal, key.code)?;
+            continue;
+        }
+
+        let action = derive_action(session, key);
+        session.play_nav_sfx(action);
+        let result_action = dispatch_action(session, action);
+
+        if let Some(ra) = result_action {
+            apply_outcome(session, terminal, ra)?;
+        }
+    }
+    Ok(())
+}
+
+fn derive_action(session: &Session, key: crossterm::event::KeyEvent) -> Action {
+    match session.app.screen {
+        Screen::Gameplay | Screen::Calibrate => {
+            input::map_key_gameplay(key, &session.config.keys.lanes)
+        }
+        Screen::Settings => {
+            let menu_action = input::map_key_menu(key);
+            if menu_action == Action::None {
+                input::map_key_gameplay(key, &session.config.keys.lanes)
+            } else {
+                menu_action
+            }
+        }
+        _ => input::map_key_menu(key),
+    }
+}
+
+fn dispatch_action(session: &mut Session, action: Action) -> Option<Action> {
+    match session.app.screen {
+        Screen::Menu => {
+            if action == Action::Quit {
+                Some(Action::Quit)
+            } else {
+                session.menu.handle_action(action)
+            }
+        }
+        Screen::SongSelect => match action {
+            Action::Import => {
+                session.song_select.import_mode = true;
+                session.song_select.import_input.clear();
+                None
+            }
+            Action::Quit => Some(Action::Navigate(Screen::Menu)),
+            _ => session.song_select.handle_action(action),
+        },
+        Screen::Gameplay => session
+            .gameplay
+            .as_mut()
+            .and_then(|gp| gp.handle_action(action)),
+        Screen::Results => session
+            .results
+            .as_mut()
+            .and_then(|rs| rs.handle_action(action)),
+        Screen::Settings => session.settings.as_mut().and_then(|st| {
+            if action == Action::Quit {
+                Some(Action::Navigate(Screen::Menu))
+            } else {
+                st.handle_action(action)
+            }
+        }),
+        Screen::Calibrate => session
+            .calibrate
+            .as_mut()
+            .and_then(|cl| cl.handle_action(action)),
+    }
+}
+
+fn apply_outcome(
+    session: &mut Session,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    outcome: Action,
+) -> Result<()> {
+    match outcome {
+        Action::Quit => session.app.quit(),
+        Action::Navigate(screen) => transition_to(session, terminal, screen)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn transition_to(
+    session: &mut Session,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    screen: Screen,
+) -> Result<()> {
+    match screen {
+        Screen::SongSelect => {
+            session.song_select.scan_songs(&session.songs_dir);
+            session.gameplay = None;
+        }
+        Screen::Gameplay => {
+            draw_loading(terminal)?;
+            match session.launch_gameplay_from_song_select() {
+                Ok(true) => {}
+                Ok(false) => {
+                    session.app.navigate(Screen::SongSelect);
+                    return Ok(());
+                }
+                Err(e) => {
+                    session.song_select.import_status = Some(format!("Audio error: {}", e));
+                    session.app.navigate(Screen::SongSelect);
+                    return Ok(());
+                }
+            }
+        }
+        Screen::Results => session.finalize_to_results(),
+        Screen::Settings => {
+            let cfg = Config::load(&Config::default_path()).unwrap_or_default();
+            session.settings = Some(SettingsScreen::new(cfg));
+        }
+        Screen::Calibrate => {
+            let cfg = Config::load(&Config::default_path()).unwrap_or_default();
+            match CalibrateScreen::new(cfg) {
+                Ok(mut cl) => {
+                    cl.start();
+                    session.calibrate = Some(cl);
+                }
+                Err(_) => {
+                    session.app.navigate(Screen::Settings);
+                    return Ok(());
+                }
+            }
+        }
+        Screen::Menu => {
+            session.last_beatmap_path = None;
+            session.last_audio_path = None;
+        }
+    }
+    session.app.navigate(screen);
+    Ok(())
+}
+
+fn draw_loading(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    terminal.draw(|frame| {
+        let area = frame.area();
+        let buf = frame.buffer_mut();
+        let msg = "Loading...";
+        let x = area.x + (area.width.saturating_sub(msg.len() as u16)) / 2;
+        let y = area.y + area.height / 2;
+        buf.set_string(x, y, msg, Style::default().fg(Color::Rgb(140, 140, 140)));
+    })?;
+    Ok(())
+}
+
+fn handle_import_input(
+    session: &mut Session,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    code: KeyCode,
+) -> Result<()> {
+    match code {
+        KeyCode::Char(c) => {
+            session.song_select.import_input.push(c);
+        }
+        KeyCode::Backspace => {
+            session.song_select.import_input.pop();
+        }
+        KeyCode::Esc => {
+            session.song_select.import_mode = false;
+            session.song_select.import_input.clear();
+        }
+        KeyCode::Enter => {
+            let raw = session.song_select.import_input.clone();
+            session.song_select.import_mode = false;
+            session.song_select.import_input.clear();
+            if raw.is_empty() {
+                return Ok(());
+            }
+            run_import(session, terminal, PathBuf::from(raw.trim()))?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn run_import(
+    session: &mut Session,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    file_path: PathBuf,
+) -> Result<()> {
+    session.song_select.import_status = Some("Importing...".to_string());
+    terminal.draw(|frame| session.song_select.render(frame, frame.area()))?;
+
+    let song = match audio::import::import_local_file(&file_path, &session.songs_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            session.song_select.import_status = Some(format!("Error: {}", e));
+            return Ok(());
+        }
+    };
+
+    session.song_select.import_status = Some(format!("Generating beatmaps for {}...", song.title));
+    terminal.draw(|frame| session.song_select.render(frame, frame.area()))?;
+
+    match audio::analyzer::decode_audio(&song.audio_path) {
+        Ok((samples, sample_rate)) => {
+            let duration_ms = (samples.len() as f64 / sample_rate as f64 * 1000.0) as u64;
+            let audio_filename = song
+                .audio_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let meta = beatmap::types::SongMeta {
+                title: song.title.clone(),
+                artist: String::new(),
+                audio_file: audio_filename,
+                bpm: 120,
+                duration_ms,
+            };
+            let beatmaps = beatmap::generator::generate_all_beatmaps(&samples, sample_rate, meta);
+            for bm in &beatmaps {
+                let path = song.dir.join(bm.difficulty.filename());
+                let _ = beatmap::loader::save(bm, &path);
+            }
+            session.song_select.import_status = Some(format!("Imported: {}", song.title));
+        }
+        Err(e) => {
+            session.song_select.import_status = Some(format!("Decode error: {}", e));
+        }
+    }
+    session.song_select.scan_songs(&session.songs_dir);
+    Ok(())
+}
+
+fn update(session: &mut Session, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+    match session.app.screen {
+        Screen::Gameplay => {
+            if let Some(gp) = &mut session.gameplay {
+                gp.update();
+                if gp.finished {
+                    session.finalize_to_results();
+                    session.app.navigate(Screen::Results);
+                }
+            }
+        }
+        Screen::Calibrate => {
+            if let Some(cl) = &mut session.calibrate {
+                cl.update();
+            }
+        }
+        Screen::Results => {
+            if let Some(rs) = &mut session.results {
+                rs.update();
+            }
+        }
+        Screen::Menu => {
+            let area = terminal.get_frame().area();
+            session.menu.update(area);
+        }
+        _ => {}
+    }
+}
+
+fn draw(
+    session: &mut Session,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
+    terminal.draw(|frame| {
+        let area = frame.area();
+        match session.app.screen {
+            Screen::Menu => session.menu.render(frame, area),
+            Screen::SongSelect => session.song_select.render(frame, area),
+            Screen::Gameplay => {
+                if let Some(gp) = &mut session.gameplay {
+                    gp.render(frame, area);
+                }
+            }
+            Screen::Results => {
+                if let Some(rs) = &session.results {
+                    rs.render(frame, area);
+                }
+            }
+            Screen::Settings => {
+                if let Some(st) = &session.settings {
+                    st.render(frame, area);
+                }
+            }
+            Screen::Calibrate => {
+                if let Some(cl) = &session.calibrate {
+                    cl.render(frame, area);
+                }
+            }
+        }
+    })?;
     Ok(())
 }

@@ -1,27 +1,40 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Widget;
+
+use crate::game::effects::{Particle, Star};
 use crate::game::highway::VisibleNote;
 use crate::game::hit_judge::Judgement;
+use crate::ui::color::{Rgb, add as color_add, mul as color_mul, smoothstep};
+use crate::ui::pixel_buffer::PixelBuffer;
 
 const LANE_COUNT: usize = 5;
+const NOTE_PX_HEIGHT: i32 = 3;
+const ANTICIPATION_MS: f64 = 250.0;
 
-/// Colors for each lane (muted pastels)
-const LANE_COLORS: [(u8, u8, u8); LANE_COUNT] = [
-    (180, 80, 80),    // D — red
-    (80, 160, 80),    // F — green
-    (180, 160, 60),   // _ — yellow
-    (80, 120, 200),   // J — blue
-    (160, 80, 180),   // K — purple
+const LANE_COLORS: [Rgb; LANE_COUNT] = [
+    (220, 80, 80),  // D — red
+    (80, 200, 90),  // F — green
+    (230, 210, 80), // _ — yellow
+    (80, 140, 230), // J — blue
+    (190, 80, 220), // K — purple
 ];
 
 pub struct HighwayWidget<'a> {
     pub notes: &'a [VisibleNote],
     pub lane_labels: [&'a str; LANE_COUNT],
     pub hit_flash: [u8; LANE_COUNT],
+    pub lane_burst: [u8; LANE_COUNT],
     pub last_judgement: Option<Judgement>,
     pub judgement_timer: u8,
-    pub particles: &'a [(u16, u16, u8)],
+    pub judgement_elapsed: u8,
+    pub particles: &'a [Particle],
+    pub stars: &'a [Star],
+    pub spectrum_bands: &'a [f32],
     pub energy: f32,
+    pub beat_pulse: f32,
+    pub combo: u32,
+    pub current_ms: u64,
+    pub look_ahead_ms: f64,
 }
 
 impl<'a> HighwayWidget<'a> {
@@ -30,10 +43,18 @@ impl<'a> HighwayWidget<'a> {
             notes,
             lane_labels: ["D", "F", "_", "J", "K"],
             hit_flash: [0; LANE_COUNT],
+            lane_burst: [0; LANE_COUNT],
             last_judgement: None,
             judgement_timer: 0,
+            judgement_elapsed: 0,
             particles: &[],
+            stars: &[],
+            spectrum_bands: &[],
             energy: 0.0,
+            beat_pulse: 0.0,
+            combo: 0,
+            current_ms: 0,
+            look_ahead_ms: 2000.0,
         }
     }
 
@@ -41,37 +62,53 @@ impl<'a> HighwayWidget<'a> {
         self.hit_flash = flash;
         self
     }
-
-    pub fn with_judgement(mut self, judgement: Option<Judgement>, timer: u8) -> Self {
-        self.last_judgement = judgement;
+    pub fn with_lane_burst(mut self, burst: [u8; LANE_COUNT]) -> Self {
+        self.lane_burst = burst;
+        self
+    }
+    pub fn with_judgement(mut self, j: Option<Judgement>, timer: u8, elapsed: u8) -> Self {
+        self.last_judgement = j;
         self.judgement_timer = timer;
+        self.judgement_elapsed = elapsed;
+        self
+    }
+    pub fn with_particles(mut self, p: &'a [Particle]) -> Self {
+        self.particles = p;
+        self
+    }
+    pub fn with_stars(mut self, s: &'a [Star]) -> Self {
+        self.stars = s;
+        self
+    }
+    pub fn with_spectrum(mut self, bands: &'a [f32]) -> Self {
+        self.spectrum_bands = bands;
+        self
+    }
+    pub fn with_energy(mut self, e: f32) -> Self {
+        self.energy = e;
+        self
+    }
+    pub fn with_beat_pulse(mut self, p: f32) -> Self {
+        self.beat_pulse = p;
+        self
+    }
+    pub fn with_combo(mut self, c: u32) -> Self {
+        self.combo = c;
+        self
+    }
+    pub fn with_timing(mut self, current_ms: u64, look_ahead_ms: f64) -> Self {
+        self.current_ms = current_ms;
+        self.look_ahead_ms = look_ahead_ms;
         self
     }
 
-    pub fn with_particles(mut self, particles: &'a [(u16, u16, u8)]) -> Self {
-        self.particles = particles;
-        self
-    }
-
-    pub fn with_energy(mut self, energy: f32) -> Self {
-        self.energy = energy;
-        self
-    }
-
-    /// Compute left edge X and width for a lane at a given vertical position.
-    /// Slight narrowing at top gives subtle perspective without ugly ASCII walls.
     fn lane_rect(&self, lane: usize, row: u16, highway_height: u16, area: Rect) -> (u16, u16) {
-        // Perspective factor: 1.0 at bottom, shrinks toward top
-        let t = row as f64 / highway_height.max(1) as f64; // 0=top, 1=bottom
-        let squeeze = 0.7 + 0.3 * t; // 0.7 at top, 1.0 at bottom
-
-        let total_lane_width = area.width as f64 * squeeze;
-        let lane_w = (total_lane_width / LANE_COUNT as f64).max(3.0);
-        let highway_start = (area.width as f64 - total_lane_width) / 2.0 + area.x as f64;
-
-        let x = (highway_start + lane as f64 * lane_w) as u16;
-        let w = lane_w as u16;
-        (x, w)
+        let t = row as f64 / highway_height.max(1) as f64;
+        let squeeze = 0.78 + 0.22 * t;
+        let total_w = area.width as f64 * squeeze;
+        let lane_w = (total_w / LANE_COUNT as f64).max(3.0);
+        let highway_start = (area.width as f64 - total_w) / 2.0 + area.x as f64;
+        ((highway_start + lane as f64 * lane_w) as u16, lane_w as u16)
     }
 }
 
@@ -80,165 +117,473 @@ impl<'a> Widget for HighwayWidget<'a> {
         if area.width < 30 || area.height < 8 {
             return;
         }
+        let highway_height = area.height.saturating_sub(3);
+        if highway_height == 0 {
+            return;
+        }
+        let height_px = highway_height as i32 * 2;
 
-        let highway_height = area.height.saturating_sub(3); // hit zone + judgement + 1
+        let mut px = PixelBuffer::new(area.width, height_px);
+        let local_x = |ax: u16| -> u16 { ax.saturating_sub(area.x) };
+        let combo_heat = ((self.combo as f32 / 50.0).min(1.0)).powf(0.7);
 
-        // Draw lane backgrounds (subtle colored columns)
-        for row in 0..highway_height {
-            let y = area.y + row;
-            let t = row as f64 / highway_height as f64; // 0=top, 1=bottom
+        self.draw_starfield(&mut px, &local_x);
+        self.draw_lane_backgrounds(&mut px, &local_x, area, highway_height, combo_heat);
+        self.draw_lane_bursts(&mut px, &local_x, area, highway_height);
+        self.draw_hold_trails(&mut px, &local_x, area, highway_height);
+        self.draw_notes(&mut px, &local_x, area, highway_height);
+        self.draw_particles(&mut px, &local_x);
+        apply_vignette(&mut px, area.width, height_px);
+        flush_pixels(buf, &px, area, highway_height);
+
+        if !self.spectrum_bands.is_empty() {
+            self.draw_spectrum_margins(buf, area, highway_height);
+        }
+        self.draw_hit_zone(buf, area, highway_height);
+        self.draw_judgement_feedback(buf, area, highway_height);
+    }
+}
+
+impl<'a> HighwayWidget<'a> {
+    fn draw_starfield(&self, px: &mut PixelBuffer, local_x: &impl Fn(u16) -> u16) {
+        for star in self.stars {
+            if star.y_px < 0.0 || star.y_px >= px.height_px as f32 {
+                continue;
+            }
+            let cx = star.x as u16;
+            let b = star.brightness;
+            let color = (b, b, (b as u16 + 20).min(200) as u8);
+            px.blend(local_x(cx), star.y_px as i32, color, 0.55);
+        }
+    }
+
+    fn draw_lane_backgrounds(
+        &self,
+        px: &mut PixelBuffer,
+        local_x: &impl Fn(u16) -> u16,
+        area: Rect,
+        highway_height: u16,
+        combo_heat: f32,
+    ) {
+        let height_px = highway_height as i32 * 2;
+        for py in 0..height_px {
+            let row = (py / 2) as u16;
+            let t = py as f32 / height_px as f32;
+            let energy_mul = 1.0 + self.energy * 0.22 + self.beat_pulse * 0.12;
 
             for lane in 0..LANE_COUNT {
                 let (lx, lw) = self.lane_rect(lane, row, highway_height, area);
-                let (cr, cg, cb) = LANE_COLORS[lane];
+                let base_intensity = (t * 0.09 + 0.02) * energy_mul;
+                let bg = color_mul(LANE_COLORS[lane], base_intensity);
+                let heat = color_mul((230, 80, 40), combo_heat * 0.06 * t);
+                let color = color_add(bg, heat);
 
-                // Very subtle background: brighter at bottom, dimmer at top
-                // Pulse with energy from spectrum analyzer
-                let energy_mult = 1.0 + self.energy * 0.3;
-                let intensity = (t * 0.12 + 0.03) as f32 * energy_mult;
-                let bg_r = (cr as f32 * intensity).min(50.0) as u8;
-                let bg_g = (cg as f32 * intensity).min(50.0) as u8;
-                let bg_b = (cb as f32 * intensity).min(50.0) as u8;
-
-                for x in lx..lx + lw {
-                    if x < area.x + area.width {
-                        buf.set_string(x, y, " ", Style::default().bg(Color::Rgb(bg_r, bg_g, bg_b)));
+                for cx in lx..lx + lw {
+                    if cx < area.x + area.width {
+                        let cur = px.get(local_x(cx), py);
+                        let blended = (
+                            ((cur.0 as f32) * 0.25 + color.0 as f32 * 0.85).min(255.0) as u8,
+                            ((cur.1 as f32) * 0.25 + color.1 as f32 * 0.85).min(255.0) as u8,
+                            ((cur.2 as f32) * 0.25 + color.2 as f32 * 0.85).min(255.0) as u8,
+                        );
+                        px.set(local_x(cx), py, blended);
                     }
                 }
 
-                // Lane separator (right edge)
-                if lx + lw < area.x + area.width {
-                    let sep_b = (t * 30.0 + 10.0) as u8;
-                    buf.set_string(lx + lw, y, " ",
-                        Style::default().bg(Color::Rgb(sep_b, sep_b, sep_b)));
+                let sep_x = lx + lw;
+                if sep_x < area.x + area.width {
+                    let sep_v = ((t * 35.0) as u8).saturating_add(10);
+                    px.set(local_x(sep_x), py, (sep_v, sep_v, sep_v));
                 }
             }
         }
+    }
 
-        // Draw hold note trails
+    fn draw_lane_bursts(
+        &self,
+        px: &mut PixelBuffer,
+        local_x: &impl Fn(u16) -> u16,
+        area: Rect,
+        highway_height: u16,
+    ) {
+        let height_px = highway_height as i32 * 2;
+        for lane in 0..LANE_COUNT {
+            let burst = self.lane_burst[lane];
+            if burst == 0 {
+                continue;
+            }
+            let strength = burst as f32 / 8.0;
+            let color = color_mul(LANE_COLORS[lane], 0.8);
+            let streak_len = (height_px as f32 * (0.25 + 0.3 * strength)) as i32;
+            for dy in 0..streak_len {
+                let py = height_px - 1 - dy;
+                let fade = (1.0 - dy as f32 / streak_len as f32).powf(1.5) * strength;
+                let row = (py / 2) as u16;
+                let (lx, lw) = self.lane_rect(lane, row, highway_height, area);
+                for cx in lx..lx + lw {
+                    if cx < area.x + area.width {
+                        px.add(local_x(cx), py, color, 0.35 * fade);
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_hold_trails(
+        &self,
+        px: &mut PixelBuffer,
+        local_x: &impl Fn(u16) -> u16,
+        area: Rect,
+        highway_height: u16,
+    ) {
+        let height_px = highway_height as i32 * 2;
         for note in self.notes {
-            if note.duration_ms == 0 || note.end_position <= note.position { continue; }
+            if note.duration_ms == 0 || note.end_position <= note.position {
+                continue;
+            }
+            let py_top = ((1.0 - note.end_position.clamp(0.0, 1.0)) * height_px as f64) as i32;
+            let py_bot = ((1.0 - note.position.clamp(0.0, 1.0)) * height_px as f64) as i32;
+            let lane_color = LANE_COLORS[note.lane as usize % LANE_COUNT];
 
-            let start_row = ((1.0 - note.end_position.clamp(0.0, 1.0)) * highway_height as f64) as u16;
-            let end_row = ((1.0 - note.position.clamp(0.0, 1.0)) * highway_height as f64) as u16;
-            let (cr, cg, cb) = LANE_COLORS[note.lane as usize % LANE_COUNT];
-
-            for row in start_row..=end_row.min(highway_height.saturating_sub(1)) {
-                let y = area.y + row;
+            for py in py_top.max(0)..=py_bot.min(height_px - 1) {
+                let row = (py / 2) as u16;
                 let (lx, lw) = self.lane_rect(note.lane as usize, row, highway_height, area);
-                let cx = lx + lw / 2;
-                if cx >= area.x && cx < area.x + area.width && y < area.y + area.height {
-                    let t = row as f64 / highway_height as f64;
-                    let intensity = (t * 0.5 + 0.3) as f32;
-                    let r = (cr as f32 * intensity) as u8;
-                    let g = (cg as f32 * intensity) as u8;
-                    let b = (cb as f32 * intensity) as u8;
-                    buf.set_string(cx, y, "|", Style::default().fg(Color::Rgb(r, g, b)));
+                let center = lx + lw / 2;
+                let intensity = (py as f32 / height_px as f32) * 0.55 + 0.45;
+                let color = color_mul(lane_color, intensity);
+
+                px.blend(local_x(center), py, color, 0.9);
+                if center > area.x {
+                    px.blend(local_x(center - 1), py, color, 0.35);
+                }
+                if center + 1 < area.x + area.width {
+                    px.blend(local_x(center + 1), py, color, 0.35);
                 }
             }
         }
+    }
 
-        // Draw notes
+    fn draw_notes(
+        &self,
+        px: &mut PixelBuffer,
+        local_x: &impl Fn(u16) -> u16,
+        area: Rect,
+        highway_height: u16,
+    ) {
+        let height_px = highway_height as i32 * 2;
         for note in self.notes {
-            if note.position < -0.05 || note.position > 1.0 { continue; }
-
-            let row = ((1.0 - note.position) * highway_height as f64) as u16;
-            let y = area.y + row.min(highway_height.saturating_sub(1));
+            if note.position < -0.1 || note.position > 1.05 {
+                continue;
+            }
+            let approach = smoothstep(0.5, 0.0, note.position as f32);
+            let center_py = ((1.0 - note.position) * height_px as f64) as i32;
+            let row = (center_py / 2).clamp(0, highway_height as i32 - 1) as u16;
             let (lx, lw) = self.lane_rect(note.lane as usize, row, highway_height, area);
-            let (cr, cg, cb) = LANE_COLORS[note.lane as usize % LANE_COUNT];
+            let lane_color = LANE_COLORS[note.lane as usize % LANE_COUNT];
 
-            // Note = filled block spanning most of lane width
-            let t = row as f64 / highway_height as f64; // brightness by position
-            let intensity = (t * 0.7 + 0.3) as f32;
-            let r = (cr as f32 * intensity).min(255.0) as u8;
-            let g = (cg as f32 * intensity).min(255.0) as u8;
-            let b = (cb as f32 * intensity).min(255.0) as u8;
+            let note_w = lw.saturating_sub(1).max(1);
+            let note_x = lx + lw.saturating_sub(note_w) / 2;
 
-            // Note width: narrower at top, wider at bottom
-            let note_w = (lw.saturating_sub(2)).max(1);
-            let note_x = lx + (lw - note_w) / 2;
+            for dy in 0..NOTE_PX_HEIGHT {
+                let py = center_py + dy - NOTE_PX_HEIGHT / 2;
+                let base_i = match dy {
+                    0 => 0.65,
+                    1 => 1.0,
+                    _ => 0.85,
+                };
+                let intensity = (base_i + 0.25 * approach).min(1.25);
+                let color = color_mul(lane_color, intensity);
+                for cx in note_x..note_x + note_w {
+                    px.blend(local_x(cx), py, color, 1.0);
+                }
+            }
 
-            for x in note_x..note_x + note_w {
-                if x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height {
-                    buf.set_string(x, y, " ", Style::default().bg(Color::Rgb(r, g, b)));
+            let halo = color_mul(lane_color, 0.55 + 0.35 * approach);
+            for &dy in &[-NOTE_PX_HEIGHT / 2 - 1, NOTE_PX_HEIGHT / 2 + 1] {
+                let py = center_py + dy;
+                for cx in note_x..note_x + note_w {
+                    px.blend(local_x(cx), py, halo, 0.35 + 0.25 * approach);
+                }
+            }
+            for dy in -NOTE_PX_HEIGHT / 2..=NOTE_PX_HEIGHT / 2 {
+                let py = center_py + dy;
+                if note_x > area.x {
+                    px.blend(local_x(note_x - 1), py, halo, 0.4);
+                }
+                let right = note_x + note_w;
+                if right < area.x + area.width {
+                    px.blend(local_x(right), py, halo, 0.4);
                 }
             }
         }
+    }
 
-        // === HIT ZONE ===
+    fn draw_particles(&self, px: &mut PixelBuffer, local_x: &impl Fn(u16) -> u16) {
+        for p in self.particles {
+            if p.life == 0 {
+                continue;
+            }
+            let alpha = p.alpha();
+            let color = color_mul(p.color, 0.6 + 0.4 * alpha);
+            px.add(local_x(p.x as u16), p.y_px as i32, color, alpha * 0.8);
+        }
+    }
+
+    fn draw_spectrum_margins(&self, buf: &mut Buffer, area: Rect, highway_height: u16) {
+        let (left_x, _) = self.lane_rect(0, highway_height, highway_height, area);
+        let (right_x, right_w) =
+            self.lane_rect(LANE_COUNT - 1, highway_height, highway_height, area);
+        let inner_right = right_x + right_w;
+        let left_margin = left_x.saturating_sub(area.x);
+        let right_margin = (area.x + area.width).saturating_sub(inner_right);
+
+        if left_margin >= 3 {
+            draw_spectrum(
+                buf,
+                area.x,
+                area.y,
+                left_margin - 1,
+                highway_height,
+                self.spectrum_bands,
+                true,
+            );
+        }
+        if right_margin >= 3 {
+            draw_spectrum(
+                buf,
+                inner_right + 1,
+                area.y,
+                right_margin.saturating_sub(2),
+                highway_height,
+                self.spectrum_bands,
+                false,
+            );
+        }
+    }
+
+    fn draw_hit_zone(&self, buf: &mut Buffer, area: Rect, highway_height: u16) {
         let hit_y = area.y + highway_height;
-        if hit_y >= area.y + area.height { return; }
+        if hit_y >= area.y + area.height {
+            return;
+        }
 
-        // Draw receptors per lane
+        let anticipation = self.anticipation_per_lane();
+
         for (i, label) in self.lane_labels.iter().enumerate() {
             let (lx, lw) = self.lane_rect(i, highway_height, highway_height, area);
-            let (cr, cg, cb) = LANE_COLORS[i];
+            let base_color = LANE_COLORS[i];
             let flash = self.hit_flash[i];
-
-            if flash > 0 {
-                // Flash: bright lane color
-                let f = flash as f32 / 8.0;
-                let r = (cr as f32 * f).min(255.0) as u8;
-                let g = (cg as f32 * f).min(255.0) as u8;
-                let b = (cb as f32 * f).min(255.0) as u8;
-
-                for x in lx..lx + lw {
-                    if x < area.x + area.width {
-                        buf.set_string(x, hit_y, " ", Style::default().bg(Color::Rgb(r, g, b)));
-                    }
-                }
-                // Label on top
-                let label_x = lx + lw / 2;
-                if label_x < area.x + area.width {
-                    buf.set_string(label_x, hit_y, label,
-                        Style::default().fg(Color::Rgb(255, 255, 255)).bg(Color::Rgb(r, g, b)).bold());
-                }
+            let pulse_intensity = if flash > 0 {
+                (flash as f32 / 8.0).min(1.0)
             } else {
-                // Idle: dim colored receptor
-                let r = (cr as f32 * 0.25) as u8;
-                let g = (cg as f32 * 0.25) as u8;
-                let b = (cb as f32 * 0.25) as u8;
+                let ambient = 0.28 + self.beat_pulse * 0.25 + self.energy * 0.06;
+                (ambient + anticipation[i] * 0.7).min(1.1)
+            };
+            let bg_color = color_mul(base_color, pulse_intensity);
+            let fg_color = if flash > 0 {
+                (255, 255, 255)
+            } else if anticipation[i] > 0.5 {
+                color_mul(base_color, 1.2)
+            } else {
+                color_mul(base_color, 0.75)
+            };
 
-                for x in lx..lx + lw {
-                    if x < area.x + area.width {
-                        buf.set_string(x, hit_y, " ", Style::default().bg(Color::Rgb(r, g, b)));
-                    }
-                }
-                let label_x = lx + lw / 2;
-                if label_x < area.x + area.width {
-                    buf.set_string(label_x, hit_y, label,
-                        Style::default().fg(Color::Rgb(cr / 2, cg / 2, cb / 2)).bg(Color::Rgb(r, g, b)));
-                }
-            }
-        }
-
-        // Draw particles
-        for &(px, py, lifetime) in self.particles {
-            if px >= area.x && px < area.x + area.width && py >= area.y && py < area.y + area.height {
-                let brightness = (lifetime as f32 / 10.0 * 255.0).min(255.0) as u8;
-                let ch = if lifetime > 5 { "*" } else { "'" };
-                buf.set_string(px, py, ch,
-                    Style::default().fg(Color::Rgb(brightness, brightness, (brightness as f32 * 0.7) as u8)));
-            }
-        }
-
-        // Judgement feedback row
-        let feedback_y = hit_y + 1;
-        if feedback_y < area.y + area.height {
-            if let Some(judgement) = self.last_judgement {
-                if self.judgement_timer > 0 {
-                    let fade = self.judgement_timer as f32 / 30.0;
-                    let (text, color) = match judgement {
-                        Judgement::Perfect => ("PERFECT", Color::Rgb((255.0 * fade) as u8, (255.0 * fade) as u8, (200.0 * fade) as u8)),
-                        Judgement::Great =>   ("GREAT",   Color::Rgb((180.0 * fade) as u8, (220.0 * fade) as u8, (180.0 * fade) as u8)),
-                        Judgement::Good =>    ("GOOD",    Color::Rgb((140.0 * fade) as u8, (140.0 * fade) as u8, (140.0 * fade) as u8)),
-                        Judgement::Miss =>    ("MISS",    Color::Rgb((120.0 * fade) as u8, (50.0 * fade) as u8, (50.0 * fade) as u8)),
-                    };
-                    let tw = text.len() as u16;
-                    let tx = area.x + area.width / 2 - tw / 2;
-                    buf.set_string(tx, feedback_y, text, Style::default().fg(color).bold());
+            let bg = Color::Rgb(bg_color.0, bg_color.1, bg_color.2);
+            for cx in lx..lx + lw {
+                if cx < area.x + area.width {
+                    buf.set_string(cx, hit_y, " ", Style::default().bg(bg));
                 }
             }
+            let label_x = lx + lw / 2;
+            if label_x < area.x + area.width {
+                buf.set_string(
+                    label_x,
+                    hit_y,
+                    label,
+                    Style::default()
+                        .fg(Color::Rgb(fg_color.0, fg_color.1, fg_color.2))
+                        .bg(bg)
+                        .bold(),
+                );
+            }
         }
+    }
+
+    fn anticipation_per_lane(&self) -> [f32; LANE_COUNT] {
+        let anticipation_pos = (ANTICIPATION_MS / self.look_ahead_ms).min(1.0);
+        let mut out = [0.0_f32; LANE_COUNT];
+        for note in self.notes {
+            let lane = note.lane as usize;
+            if lane >= LANE_COUNT || note.position < 0.0 || note.position > anticipation_pos {
+                continue;
+            }
+            let strength = (1.0 - note.position as f32 / anticipation_pos as f32).clamp(0.0, 1.0);
+            if strength > out[lane] {
+                out[lane] = strength;
+            }
+        }
+        out
+    }
+
+    fn draw_judgement_feedback(&self, buf: &mut Buffer, area: Rect, highway_height: u16) {
+        let feedback_y = area.y + highway_height + 1;
+        if feedback_y >= area.y + area.height {
+            return;
+        }
+        let (Some(judgement), timer) = (self.last_judgement, self.judgement_timer) else {
+            return;
+        };
+        if timer == 0 {
+            return;
+        }
+
+        let elapsed = self.judgement_elapsed as f32;
+        let progress = (elapsed / 30.0).clamp(0.0, 1.0);
+        let scale = if elapsed < 6.0 {
+            (elapsed / 6.0).min(1.0)
+        } else {
+            1.0
+        };
+        let fade = (1.0 - progress).powf(0.7);
+
+        let (text, base_color) = match judgement {
+            Judgement::Perfect => ("PERFECT!", (255, 240, 150)),
+            Judgement::Great => ("GREAT", (180, 240, 180)),
+            Judgement::Good => ("good", (170, 170, 170)),
+            Judgement::Miss => ("miss", (200, 80, 80)),
+        };
+        let color = color_mul(base_color, fade);
+        let tw = (text.len() as f32 * scale).ceil() as u16;
+        let tx = (area.x + area.width / 2).saturating_sub(tw / 2);
+        let y_off = (elapsed / 12.0) as u16;
+        let y = feedback_y.saturating_sub(y_off);
+        if y < area.y {
+            return;
+        }
+
+        let visible: String = if scale >= 1.0 {
+            text.to_string()
+        } else {
+            text.chars()
+                .take((text.len() as f32 * scale).ceil() as usize)
+                .collect()
+        };
+        buf.set_string(
+            tx,
+            y,
+            &visible,
+            Style::default()
+                .fg(Color::Rgb(color.0, color.1, color.2))
+                .bold(),
+        );
+    }
+}
+
+fn apply_vignette(px: &mut PixelBuffer, width: u16, height_px: i32) {
+    let edge_x = (width as f32 * 0.12).max(3.0);
+    let edge_y = (height_px as f32 * 0.08).max(2.0);
+    for py in 0..height_px {
+        let dy = (py as f32).min((height_px - 1 - py) as f32);
+        let vy = (dy / edge_y).min(1.0);
+        for x in 0..width {
+            let dx = (x as f32).min((width - 1 - x) as f32);
+            let vx = (dx / edge_x).min(1.0);
+            let v = (vx * vy).powf(0.8);
+            if v < 1.0 {
+                let cur = px.get(x, py);
+                px.set(x, py, color_mul(cur, 0.4 + 0.6 * v));
+            }
+        }
+    }
+}
+
+fn flush_pixels(buf: &mut Buffer, px: &PixelBuffer, area: Rect, highway_height: u16) {
+    for row in 0..highway_height {
+        let y = area.y + row;
+        let py_top = (row as i32) * 2;
+        let py_bot = py_top + 1;
+        for x_local in 0..area.width {
+            let top = px.get(x_local, py_top);
+            let bot = px.get(x_local, py_bot);
+            buf.set_string(
+                area.x + x_local,
+                y,
+                "\u{2580}",
+                Style::default()
+                    .fg(Color::Rgb(top.0, top.1, top.2))
+                    .bg(Color::Rgb(bot.0, bot.1, bot.2)),
+            );
+        }
+    }
+}
+
+fn draw_spectrum(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    bands: &[f32],
+    flipped: bool,
+) {
+    if width == 0 || height == 0 || bands.is_empty() {
+        return;
+    }
+    let bars = width.clamp(4, 12);
+    let band_count = bands.len();
+    let bar_spacing = width / bars;
+    if bar_spacing == 0 {
+        return;
+    }
+
+    for b in 0..bars {
+        let band_idx = (b as usize * band_count) / bars.max(1) as usize;
+        let level = bands[band_idx.min(band_count - 1)].clamp(0.0, 1.0);
+        let bar_h_px = ((level.powf(0.6)) * height as f32 * 2.0) as i32;
+
+        let bar_x = if flipped {
+            x + width.saturating_sub((b + 1) * bar_spacing)
+        } else {
+            x + b * bar_spacing
+        };
+        if bar_x >= x + width {
+            continue;
+        }
+
+        let color = spectrum_color(level);
+
+        for row in 0..height {
+            let dist_px = bar_h_px - ((height - 1 - row) as i32 * 2);
+            let top_filled = dist_px >= 2;
+            let bot_filled = dist_px >= 1;
+            let top = if top_filled { color } else { (0, 0, 0) };
+            let bot = if bot_filled { color } else { (0, 0, 0) };
+            buf.set_string(
+                bar_x,
+                y + row,
+                "\u{2580}",
+                Style::default()
+                    .fg(Color::Rgb(top.0, top.1, top.2))
+                    .bg(Color::Rgb(bot.0, bot.1, bot.2)),
+            );
+        }
+    }
+}
+
+fn spectrum_color(level: f32) -> Rgb {
+    if level < 0.5 {
+        let t = level / 0.5;
+        (
+            (40.0 + 20.0 * t) as u8,
+            (120.0 + 100.0 * t) as u8,
+            (200.0 * (1.0 - t * 0.3)) as u8,
+        )
+    } else {
+        let t = (level - 0.5) / 0.5;
+        (
+            (60.0 + 180.0 * t) as u8,
+            (220.0 - 60.0 * t) as u8,
+            (140.0 * (1.0 - t)) as u8,
+        )
     }
 }

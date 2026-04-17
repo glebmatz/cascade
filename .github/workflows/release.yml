@@ -1,0 +1,237 @@
+name: Release
+
+# Tag a commit with `v*` (e.g. `v0.1.0`) to trigger a release.
+# The workflow builds binaries for all supported platforms, uploads them
+# as release assets, and updates the Homebrew tap formula.
+#
+# Required repository secrets:
+#   HOMEBREW_TAP_TOKEN  — Personal Access Token with `repo` scope on
+#                         github.com/glebmatz/homebrew-cascade
+#   CARGO_REGISTRY_TOKEN (optional) — crates.io token for auto-publish.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive-suffix: .tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive-suffix: .tar.gz
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive-suffix: .tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive-suffix: .tar.gz
+            cross: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive-suffix: .zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ALSA dev (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
+      - name: Install cross-compile deps (aarch64 linux)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo dpkg --add-architecture arm64
+          # Point apt at arm64 sources only for arm64 packages to avoid
+          # breaking amd64 resolution.
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu libasound2-dev:arm64
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Configure cross linker (aarch64 linux)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir dist
+          stage=cascade-${{ matrix.target }}
+          mkdir $stage
+          cp target/${{ matrix.target }}/release/cascade $stage/
+          cp README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md $stage/
+          tar czf dist/$stage.tar.gz $stage
+          shasum -a 256 dist/$stage.tar.gz > dist/$stage.tar.gz.sha256
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          mkdir dist
+          $stage = "cascade-${{ matrix.target }}"
+          mkdir $stage
+          Copy-Item "target/${{ matrix.target }}/release/cascade.exe" "$stage/"
+          Copy-Item README.md,LICENSE-MIT,LICENSE-APACHE,CHANGELOG.md "$stage/"
+          Compress-Archive -Path "$stage" -DestinationPath "dist/$stage.zip"
+          (Get-FileHash "dist/$stage.zip" -Algorithm SHA256).Hash | Out-File "dist/$stage.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cascade-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      sha256_darwin_arm64: ${{ steps.hashes.outputs.sha256_darwin_arm64 }}
+      sha256_darwin_x64:   ${{ steps.hashes.outputs.sha256_darwin_x64 }}
+      sha256_linux_arm64:  ${{ steps.hashes.outputs.sha256_linux_arm64 }}
+      sha256_linux_x64:    ${{ steps.hashes.outputs.sha256_linux_x64 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: meta
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir release
+          find artifacts -type f -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Copy install scripts
+        run: |
+          cp distribution/install.sh release/cascade-installer.sh
+          cp distribution/install.ps1 release/cascade-installer.ps1 || true
+
+      - name: Read sha256 hashes
+        id: hashes
+        run: |
+          f=release/cascade-aarch64-apple-darwin.tar.gz.sha256
+          echo "sha256_darwin_arm64=$(cut -d' ' -f1 < $f)" >> $GITHUB_OUTPUT
+          f=release/cascade-x86_64-apple-darwin.tar.gz.sha256
+          echo "sha256_darwin_x64=$(cut -d' ' -f1 < $f)" >> $GITHUB_OUTPUT
+          f=release/cascade-aarch64-unknown-linux-gnu.tar.gz.sha256
+          echo "sha256_linux_arm64=$(cut -d' ' -f1 < $f)" >> $GITHUB_OUTPUT
+          f=release/cascade-x86_64-unknown-linux-gnu.tar.gz.sha256
+          echo "sha256_linux_x64=$(cut -d' ' -f1 < $f)" >> $GITHUB_OUTPUT
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+
+  homebrew:
+    name: Update Homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    if: ${{ !contains(needs.release.outputs.version, '-') }}
+    steps:
+      - name: Check out tap
+        uses: actions/checkout@v4
+        with:
+          repository: glebmatz/homebrew-cascade
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Render formula
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          SHA_DARWIN_ARM64: ${{ needs.release.outputs.sha256_darwin_arm64 }}
+          SHA_DARWIN_X64:   ${{ needs.release.outputs.sha256_darwin_x64 }}
+          SHA_LINUX_ARM64:  ${{ needs.release.outputs.sha256_linux_arm64 }}
+          SHA_LINUX_X64:    ${{ needs.release.outputs.sha256_linux_x64 }}
+        run: |
+          cat > tap/Formula/cascade.rb <<EOF
+          class Cascade < Formula
+            desc "Terminal rhythm game with automatic beatmap generation"
+            homepage "https://github.com/glebmatz/cascade"
+            version "${VERSION}"
+            license any_of: ["MIT", "Apache-2.0"]
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/glebmatz/cascade/releases/download/v${VERSION}/cascade-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_DARWIN_ARM64}"
+              else
+                url "https://github.com/glebmatz/cascade/releases/download/v${VERSION}/cascade-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_DARWIN_X64}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/glebmatz/cascade/releases/download/v${VERSION}/cascade-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LINUX_ARM64}"
+              else
+                url "https://github.com/glebmatz/cascade/releases/download/v${VERSION}/cascade-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LINUX_X64}"
+              end
+            end
+
+            def install
+              bin.install "cascade"
+            end
+
+            test do
+              assert_match "Cascade", shell_output("#{bin}/cascade help")
+            end
+          end
+          EOF
+
+      - name: Commit and push
+        working-directory: tap
+        run: |
+          git config user.name "cascade-release-bot"
+          git config user.email "cascade-release-bot@users.noreply.github.com"
+          git add Formula/cascade.rb
+          git commit -m "cascade ${{ needs.release.outputs.version }}"
+          git push
+
+  publish-crate:
+    name: Publish to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+    if: ${{ !contains(needs.release.outputs.version, '-') && env.CARGO_REGISTRY_TOKEN != '' }}
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --token "${CARGO_REGISTRY_TOKEN}"

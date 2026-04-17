@@ -6,8 +6,10 @@ pub struct Highway {
 }
 
 pub struct VisibleNote {
+    #[allow(dead_code)]
     pub note_index: usize,
     pub lane: u8,
+    #[allow(dead_code)]
     pub time_ms: u64,
     /// 0.0 = at hit zone, 1.0 = top of screen, negative = past hit zone
     pub position: f64,
@@ -15,6 +17,7 @@ pub struct VisibleNote {
     pub end_position: f64,
     /// Duration in ms (0 = tap note)
     pub duration_ms: u64,
+    #[allow(dead_code)]
     pub hit: bool,
 }
 
@@ -26,7 +29,13 @@ impl Highway {
         }
     }
 
-    pub fn update(&mut self, notes: &[Note], current_time_ms: u64, look_ahead_ms: u64, hit_notes: &[bool]) {
+    pub fn update(
+        &mut self,
+        notes: &[Note],
+        current_time_ms: u64,
+        look_ahead_ms: u64,
+        hit_notes: &[bool],
+    ) {
         self.visible_notes.clear();
         let look_ahead = (look_ahead_ms as f64 / self.scroll_speed) as u64;
 
