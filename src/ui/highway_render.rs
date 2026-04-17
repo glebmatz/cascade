@@ -4,6 +4,7 @@ use ratatui::widgets::Widget;
 use crate::game::effects::{Particle, Star};
 use crate::game::highway::VisibleNote;
 use crate::game::hit_judge::Judgement;
+use crate::game::modifiers::{Modifier, Mods};
 use crate::ui::color::{Rgb, add as color_add, mul as color_mul, smoothstep};
 use crate::ui::pixel_buffer::PixelBuffer;
 
@@ -35,6 +36,7 @@ pub struct HighwayWidget<'a> {
     pub combo: u32,
     pub current_ms: u64,
     pub look_ahead_ms: f64,
+    pub mods: Mods,
 }
 
 impl<'a> HighwayWidget<'a> {
@@ -55,7 +57,13 @@ impl<'a> HighwayWidget<'a> {
             combo: 0,
             current_ms: 0,
             look_ahead_ms: 2000.0,
+            mods: Mods::new(),
         }
+    }
+
+    pub fn with_mods(mut self, mods: Mods) -> Self {
+        self.mods = mods;
+        self
     }
 
     pub fn with_hit_flash(mut self, flash: [u8; LANE_COUNT]) -> Self {
@@ -134,6 +142,9 @@ impl<'a> Widget for HighwayWidget<'a> {
         self.draw_notes(&mut px, &local_x, area, highway_height);
         self.draw_particles(&mut px, &local_x);
         apply_vignette(&mut px, area.width, height_px);
+        if self.mods.contains(Modifier::Flashlight) {
+            apply_flashlight(&mut px, area.width, height_px);
+        }
         flush_pixels(buf, &px, area, highway_height);
 
         if !self.spectrum_bands.is_empty() {
@@ -237,11 +248,18 @@ impl<'a> HighwayWidget<'a> {
         highway_height: u16,
     ) {
         let height_px = highway_height as i32 * 2;
+        let hidden = self.mods.contains(Modifier::Hidden);
         for note in self.notes {
             if note.duration_ms == 0 || note.end_position <= note.position {
                 continue;
             }
-            let py_top = ((1.0 - note.end_position.clamp(0.0, 1.0)) * height_px as f64) as i32;
+            // Hidden mod: only render the part of the trail in the bottom 35%.
+            let visible_top = if hidden { 0.35_f64 } else { 1.0 };
+            let trail_top = note.end_position.min(visible_top);
+            if trail_top <= note.position {
+                continue;
+            }
+            let py_top = ((1.0 - trail_top.clamp(0.0, 1.0)) * height_px as f64) as i32;
             let py_bot = ((1.0 - note.position.clamp(0.0, 1.0)) * height_px as f64) as i32;
             let lane_color = LANE_COLORS[note.lane as usize % LANE_COUNT];
 
@@ -271,8 +289,13 @@ impl<'a> HighwayWidget<'a> {
         highway_height: u16,
     ) {
         let height_px = highway_height as i32 * 2;
+        let hidden = self.mods.contains(Modifier::Hidden);
         for note in self.notes {
             if note.position < -0.1 || note.position > 1.05 {
+                continue;
+            }
+            // Hidden mod: notes only become visible in the bottom 35% of the highway.
+            if hidden && note.position > 0.35 {
                 continue;
             }
             let approach = smoothstep(0.5, 0.0, note.position as f32);
@@ -476,6 +499,26 @@ impl<'a> HighwayWidget<'a> {
                 .fg(Color::Rgb(color.0, color.1, color.2))
                 .bold(),
         );
+    }
+}
+
+/// Flashlight mod: keep a narrow horizontal band near the bottom (hit zone)
+/// fully visible; fade the rest to near-black.
+fn apply_flashlight(px: &mut PixelBuffer, width: u16, height_px: i32) {
+    // Center of the flashlight: just above the hit zone (~88% down).
+    let center_py = (height_px as f32 * 0.88) as i32;
+    let band_radius = (height_px as f32 * 0.18).max(4.0);
+    for py in 0..height_px {
+        let dy = (py - center_py).abs() as f32;
+        let visibility = (1.0 - (dy / band_radius)).clamp(0.0, 1.0).powf(1.5);
+        if visibility >= 1.0 {
+            continue;
+        }
+        let dim = 0.05 + 0.95 * visibility;
+        for x in 0..width {
+            let cur = px.get(x, py);
+            px.set(x, py, color_mul(cur, dim));
+        }
     }
 }
 

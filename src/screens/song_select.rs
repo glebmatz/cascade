@@ -1,5 +1,6 @@
 use crate::app::{Action, Screen};
 use crate::beatmap::types::{Beatmap, Difficulty};
+use crate::game::modifiers::Mods;
 use crate::score_store::ScoreStore;
 use crate::ui::chrome::{
     difficulty_color, render_bottom_bar, render_difficulty_dots, render_top_bar,
@@ -66,6 +67,8 @@ pub struct SongSelectScreen {
     pub rename_mode: bool,
     pub rename_buf: String,
     pub rename_field: RenameField,
+    pub mods: Mods,
+    pub mods_overlay: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +94,8 @@ impl SongSelectScreen {
             rename_mode: false,
             rename_buf: String::new(),
             rename_field: RenameField::Title,
+            mods: Mods::new(),
+            mods_overlay: false,
         }
     }
 
@@ -300,7 +305,7 @@ impl SongSelectScreen {
     }
 
     pub fn handle_action(&mut self, action: Action) -> Option<Action> {
-        if self.import_mode || self.search_mode || self.rename_mode {
+        if self.import_mode || self.search_mode || self.rename_mode || self.mods_overlay {
             return None;
         }
         match action {
@@ -333,6 +338,10 @@ impl SongSelectScreen {
             }
             Action::Rename => {
                 self.start_rename();
+                None
+            }
+            Action::Mods => {
+                self.mods_overlay = true;
                 None
             }
             Action::Delete => {
@@ -402,6 +411,40 @@ impl SongSelectScreen {
         }
     }
 
+    pub fn handle_mods_key(&mut self, code: KeyCode) -> bool {
+        if !self.mods_overlay {
+            return false;
+        }
+        use crate::game::modifiers::Modifier;
+        match code {
+            KeyCode::Char('h') | KeyCode::Char('H') => {
+                self.mods.toggle(Modifier::Hidden);
+                true
+            }
+            KeyCode::Char('f') | KeyCode::Char('F') => {
+                self.mods.toggle(Modifier::Flashlight);
+                true
+            }
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                self.mods.toggle(Modifier::SuddenDeath);
+                true
+            }
+            KeyCode::Char('p') | KeyCode::Char('P') => {
+                self.mods.toggle(Modifier::PerfectOnly);
+                true
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                self.mods = crate::game::modifiers::Mods::new();
+                true
+            }
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('m') => {
+                self.mods_overlay = false;
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn commit_rename_field(&mut self) {
         let Some(idx) = self.real_index() else { return };
         let song = &mut self.songs[idx];
@@ -458,11 +501,14 @@ impl SongSelectScreen {
                 ("Enter", "save"),
                 ("Esc", "cancel"),
             ]
+        } else if self.mods_overlay {
+            &[("H/F/S/P", "toggle"), ("C", "clear all"), ("Esc", "close")]
         } else {
             &[
                 ("↵", "play"),
                 ("Tab", "difficulty"),
                 ("s", "sort"),
+                ("m", "mods"),
                 ("/", "search"),
                 ("i", "import"),
                 ("r", "rename"),
@@ -523,6 +569,18 @@ impl SongSelectScreen {
             Style::default().fg(Color::Rgb(110, 110, 110)),
         );
 
+        // Active mods badge
+        if !self.mods.is_empty() {
+            let badge = format!("Mods: {}", self.mods.badge());
+            let bw = badge.chars().count() as u16;
+            buf.set_string(
+                area.x + area.width.saturating_sub(bw + 2),
+                area.y + 4,
+                &badge,
+                Style::default().fg(Color::Rgb(255, 200, 100)).bold(),
+            );
+        }
+
         if self.import_mode {
             let prompt = format!("Path to audio file: {}_", self.import_input);
             let x = area.x + 4;
@@ -563,6 +621,107 @@ impl SongSelectScreen {
 
         if self.rename_mode {
             self.render_rename_overlay(buf, area);
+        }
+        if self.mods_overlay {
+            self.render_mods_overlay(buf, area);
+        }
+    }
+
+    fn render_mods_overlay(&self, buf: &mut Buffer, area: Rect) {
+        use crate::game::modifiers::Modifier;
+        let cx = area.x + area.width / 2;
+        let cy = area.y + area.height / 2;
+        // Width adapts to terminal: target 92, shrink if needed.
+        let w: u16 = 92u16.min(area.width.saturating_sub(4)).max(50);
+        let h: u16 = 12;
+        let x = cx.saturating_sub(w / 2);
+        let y = cy.saturating_sub(h / 2);
+
+        let bg = Color::Rgb(20, 20, 28);
+        for dy in 0..h {
+            for dx in 0..w {
+                buf.set_string(x + dx, y + dy, " ", Style::default().bg(bg));
+            }
+        }
+        for dx in 0..w {
+            buf.set_string(
+                x + dx,
+                y,
+                "─",
+                Style::default().fg(Color::Rgb(80, 80, 100)).bg(bg),
+            );
+            buf.set_string(
+                x + dx,
+                y + h - 1,
+                "─",
+                Style::default().fg(Color::Rgb(80, 80, 100)).bg(bg),
+            );
+        }
+
+        let header = "MODIFIERS";
+        buf.set_string(
+            cx - header.len() as u16 / 2,
+            y + 1,
+            header,
+            Style::default().fg(Color::White).bg(bg).bold(),
+        );
+
+        let rows = [
+            ('H', Modifier::Hidden),
+            ('F', Modifier::Flashlight),
+            ('S', Modifier::SuddenDeath),
+            ('P', Modifier::PerfectOnly),
+        ];
+
+        // Layout offsets — description column is sized to whatever space remains.
+        let col_label = 4u16;
+        let col_mark = 6u16;
+        let col_name = 11u16;
+        let col_desc = 26u16;
+        let desc_max = w.saturating_sub(col_desc + 2) as usize; // 2 = right padding
+
+        for (i, (key, m)) in rows.iter().enumerate() {
+            let row_y = y + 3 + i as u16;
+            let on = self.mods.contains(*m);
+            let mark = if on { "[●]" } else { "[ ]" };
+            let mark_color = if on {
+                Color::Rgb(255, 200, 100)
+            } else {
+                Color::Rgb(100, 100, 100)
+            };
+            buf.set_string(
+                x + col_label,
+                row_y,
+                key.to_string(),
+                Style::default().fg(Color::Rgb(180, 180, 200)).bg(bg).bold(),
+            );
+            buf.set_string(
+                x + col_mark,
+                row_y,
+                mark,
+                Style::default().fg(mark_color).bg(bg).bold(),
+            );
+            buf.set_string(
+                x + col_name,
+                row_y,
+                m.label(),
+                Style::default().fg(Color::White).bg(bg).bold(),
+            );
+            let desc = m.description();
+            let truncated: String = if desc.chars().count() > desc_max {
+                desc.chars()
+                    .take(desc_max.saturating_sub(1))
+                    .chain(std::iter::once('…'))
+                    .collect()
+            } else {
+                desc.to_string()
+            };
+            buf.set_string(
+                x + col_desc,
+                row_y,
+                &truncated,
+                Style::default().fg(Color::Rgb(140, 140, 150)).bg(bg),
+            );
         }
     }
 

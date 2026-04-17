@@ -3,6 +3,7 @@
 #![allow(clippy::question_mark)] // some let...else cases are clearer than `?`
 #![allow(clippy::while_let_loop)] // explicit `loop { ... break; }` is fine for codecs
 
+pub mod achievements;
 pub mod app;
 pub mod audio;
 pub mod beatmap;

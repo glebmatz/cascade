@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-04-17
+
+### Added
+
+- **Gameplay modifiers** — Hidden, Flashlight, Sudden Death, Perfect Only.
+  Toggle in song-select with `m`, or pass via CLI: `--mods hd,fl,sd,po`.
+  Each (difficulty + mod combo) gets its own best-score slot.
+- **Achievements** — 12 unlockable achievements covering combos, grades,
+  full-combos, and mod completions. Persisted to `~/.cascade/achievements.json`,
+  shown as a splash on the Results screen, and listable via
+  `cascade achievements`.
+- **`SS` grade** for 100% accuracy runs. Big ASCII grade letter now renders
+  multi-character ranks (so `SS` displays as two stacked S glyphs).
+- **`cascade song <slug>`** CLI command — detailed view of one song:
+  metadata, note counts per difficulty, all best scores including
+  per-modifier records.
+- **Active mods badge** in song-select and on Results screen.
+
+### Changed
+
+- `cascade list` stays compact; deeper per-song stats moved to the new
+  `cascade song <slug>` command.
+
 ## [0.2.0] — 2026-04-17
 
 ### Added
@@ -83,6 +106,7 @@ First public release.
   `cascade regen`, `cascade help`.
 - **Dual MIT / Apache-2.0 licensing**.
 
-[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/glebmatz/cascade/releases/tag/v0.3.0
 [0.2.0]: https://github.com/glebmatz/cascade/releases/tag/v0.2.0
 [0.1.0]: https://github.com/glebmatz/cascade/releases/tag/v0.1.0

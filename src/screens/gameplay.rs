@@ -11,6 +11,7 @@ use crate::beatmap::types::Beatmap;
 use crate::game::effects::{Particle, Star};
 use crate::game::highway::Highway;
 use crate::game::hit_judge::{HitJudge, Judgement};
+use crate::game::modifiers::{Modifier, Mods};
 use crate::game::state::GameState;
 use crate::ui::highway_render::HighwayWidget;
 use crate::ui::hud::{HudBottom, HudTop};
@@ -64,6 +65,7 @@ pub struct GameplayScreen {
     pub scroll_speed: f64,
     pub milestone: Option<MilestoneSplash>,
     pub last_milestone: u32,
+    pub mods: Mods,
 }
 
 pub struct MilestoneSplash {
@@ -84,6 +86,7 @@ impl GameplayScreen {
         volume: f64,
         health_enabled: bool,
         holds_enabled: bool,
+        mods: Mods,
     ) -> Result<Self> {
         let mut audio = AudioPlayer::new()?;
         audio.load_samples(&samples, sample_rate)?;
@@ -124,6 +127,7 @@ impl GameplayScreen {
             scroll_speed,
             milestone: None,
             last_milestone: 0,
+            mods,
             beatmap,
             audio,
         })
@@ -226,6 +230,7 @@ impl GameplayScreen {
             .with_beat_pulse(self.beat_pulse())
             .with_combo(self.state.combo)
             .with_timing(self.audio.position_ms(), 2000.0 / self.scroll_speed)
+            .with_mods(self.mods.clone())
             .render(mid_area, buf);
 
         self.draw_milestone_splash(buf, area);
@@ -304,9 +309,13 @@ impl GameplayScreen {
             sfx::SFX_SAMPLE_RATE,
             self.sfx_volume * 0.6,
         );
+        if self.mods.contains(Modifier::SuddenDeath) {
+            self.finished = true;
+        }
     }
 
     fn register_judgement(&mut self, judgement: Judgement, lane: usize) {
+        let judgement = self.transform_judgement(judgement);
         self.state.register_judgement(judgement);
         self.judgement_timer = JUDGEMENT_DISPLAY_FRAMES;
         self.judgement_elapsed = 0;
@@ -315,12 +324,23 @@ impl GameplayScreen {
         }
         if judgement == Judgement::Miss {
             self.shake_frames = SHAKE_FRAMES_ON_MISS;
+            if self.mods.contains(Modifier::SuddenDeath) {
+                self.finished = true;
+            }
         }
         self.audio.play_sfx(
             sfx::sfx_for(judgement),
             sfx::SFX_SAMPLE_RATE,
             self.sfx_volume,
         );
+    }
+
+    fn transform_judgement(&self, j: Judgement) -> Judgement {
+        if self.mods.contains(Modifier::PerfectOnly) && j != Judgement::Perfect {
+            Judgement::Miss
+        } else {
+            j
+        }
     }
 
     fn handle_key_press(&mut self, lane: usize) {

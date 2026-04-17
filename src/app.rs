@@ -26,6 +26,7 @@ pub enum Action {
     Delete,
     Rename,
     Sort,
+    Mods,
 }
 
 pub struct App {

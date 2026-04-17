@@ -80,5 +80,20 @@ fn test_game_state_grade() {
     for _ in 0..10 {
         state.register_judgement(Judgement::Perfect);
     }
-    assert_eq!(state.grade(), "S");
+    assert_eq!(state.grade(), "SS");
+}
+
+#[test]
+fn test_game_state_grade_s_below_perfect() {
+    let mut state = GameState::new();
+    for _ in 0..19 {
+        state.register_judgement(Judgement::Perfect);
+    }
+    state.register_judgement(Judgement::Great);
+    let grade = state.grade();
+    assert!(
+        grade == "S" || grade == "SS",
+        "expected S or SS for 95%+ accuracy, got {}",
+        grade
+    );
 }

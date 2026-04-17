@@ -1,4 +1,6 @@
+use crate::achievements::AchievementId;
 use crate::app::{Action, Screen};
+use crate::game::modifiers::Mods;
 use crate::game::state::GameState;
 use crate::score_store::BestScore;
 use crate::ui::chrome::{render_bottom_bar, render_top_bar};
@@ -9,14 +11,14 @@ pub struct ResultsScreen {
     pub song_title: String,
     pub difficulty: String,
     pub selected: usize,
-    /// Previous best before this run (None if first playthrough).
     pub prev_best: Option<BestScore>,
     pub new_best: bool,
-    /// Animation: current displayed score (counts up to final).
     pub anim_score: f64,
     pub anim_combo: f64,
     pub anim_acc: f64,
     pub anim_ticks: u32,
+    pub unlocked: Vec<AchievementId>,
+    pub mods: Mods,
 }
 
 impl ResultsScreen {
@@ -26,6 +28,8 @@ impl ResultsScreen {
         difficulty: String,
         prev_best: Option<BestScore>,
         new_best: bool,
+        unlocked: Vec<AchievementId>,
+        mods: Mods,
     ) -> Self {
         Self {
             state,
@@ -38,6 +42,8 @@ impl ResultsScreen {
             anim_combo: 0.0,
             anim_acc: 0.0,
             anim_ticks: 0,
+            unlocked,
+            mods,
         }
     }
 
@@ -126,6 +132,7 @@ impl ResultsScreen {
         // Big ASCII grade letter
         let grade = self.state.grade();
         let grade_color = match grade {
+            "SS" => Color::Rgb(255, 235, 80), // bright gold
             "S" => Color::Rgb(255, 215, 0),   // gold
             "A" => Color::Rgb(110, 220, 110), // green
             "B" => Color::Rgb(110, 170, 240), // blue
@@ -227,7 +234,48 @@ impl ResultsScreen {
             );
             y += 1;
         }
-        y += 2;
+        y += 1;
+
+        // Mods badge
+        if !self.mods.is_empty() {
+            let badge = format!("Played with {}", self.mods.badge());
+            let w = badge.chars().count() as u16;
+            buf.set_string(
+                cx.saturating_sub(w / 2),
+                y,
+                &badge,
+                Style::default().fg(Color::Rgb(255, 200, 100)),
+            );
+            y += 1;
+        }
+
+        // Achievements unlocked
+        if !self.unlocked.is_empty() {
+            y += 1;
+            let header = "★ ACHIEVEMENTS UNLOCKED ★";
+            let hw = header.chars().count() as u16;
+            buf.set_string(
+                cx.saturating_sub(hw / 2),
+                y,
+                header,
+                Style::default().fg(Color::Rgb(255, 215, 0)).bold(),
+            );
+            y += 1;
+            for id in &self.unlocked {
+                let line = format!("  {} — {}", id.name(), id.description());
+                let w = line.chars().count() as u16;
+                buf.set_string(
+                    cx.saturating_sub(w / 2),
+                    y,
+                    &line,
+                    Style::default().fg(Color::Rgb(220, 220, 180)),
+                );
+                y += 1;
+            }
+            y += 1;
+        } else {
+            y += 1;
+        }
 
         // Options
         let options = ["Retry", "Back to songs"];
@@ -260,14 +308,21 @@ fn glyph(ch: &str) -> [&'static str; GLYPH_ROWS] {
 }
 
 fn render_big_letter(buf: &mut Buffer, cx: u16, y: u16, letter: &str, color: Color) {
-    let g = glyph(letter);
-    let start_x = cx.saturating_sub(GLYPH_COLS as u16 / 2);
-    for (row_i, row) in g.iter().enumerate() {
-        let py = y + row_i as u16;
-        for (ci, c) in row.chars().enumerate() {
-            if c == '█' {
-                let px = start_x + ci as u16;
-                buf.set_string(px, py, "█", Style::default().fg(color));
+    let chars: Vec<char> = letter.chars().collect();
+    let glyph_w = GLYPH_COLS as u16;
+    let gap: u16 = 1;
+    let total_w = chars.len() as u16 * glyph_w + (chars.len() as u16 - 1) * gap;
+    let start_x = cx.saturating_sub(total_w / 2);
+
+    for (idx, ch) in chars.iter().enumerate() {
+        let g = glyph(&ch.to_string());
+        let off_x = start_x + idx as u16 * (glyph_w + gap);
+        for (row_i, row) in g.iter().enumerate() {
+            let py = y + row_i as u16;
+            for (ci, c) in row.chars().enumerate() {
+                if c == '█' {
+                    buf.set_string(off_x + ci as u16, py, "█", Style::default().fg(color));
+                }
             }
         }
     }

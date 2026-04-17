@@ -32,6 +32,8 @@
   &nbsp;·&nbsp;
   <a href="#controls">Controls</a>
   &nbsp;·&nbsp;
+  <a href="#modifiers">Modifiers</a>
+  &nbsp;·&nbsp;
   <a href="#how-the-beatmap-generator-works">How it works</a>
   &nbsp;·&nbsp;
   <a href="#contributing">Contribute</a>
@@ -56,7 +58,9 @@ hold-note release detection.
 - **Chords + holds** — up to 3-note chords and sustained holds, tuned per difficulty
 - **Rich visuals** — half-block rendering, particle physics, starfield background, vignette, live spectrum bars, beat-synced receptor glow
 - **Synthesized hit feedback** — every judgement has its own click; menu navigation has its own sound
-- **Best scores** — persisted per song / difficulty
+- **Modifiers** — Hidden, Flashlight, Sudden Death, Perfect Only. Each combo gets its own best-score slot
+- **Achievements** — 12 unlockables for combos, full clears, mod runs
+- **Best scores** — persisted per song / difficulty / mod combo
 - **Calibration** — built-in metronome calibrator removes audio latency drift
 - **Terminal-native** — no Electron, no GPU, ~10 MB binary
 
@@ -112,8 +116,18 @@ cascade list
 # 3. Launch straight into gameplay.
 cascade play my-favorite-song --hard
 
+# 4. Push yourself with modifiers. Each (difficulty + mod combo) gets
+#    its own best-score slot.
+cascade play my-favorite-song --hard --mods hd,sd
+
 # Fix a typo in tags later:
 cascade rename my-favorite-song --title "Numb" --artist "Linkin Park"
+
+# Detailed stats for one song (all difficulties + mod combos):
+cascade song my-favorite-song
+
+# Track unlocks:
+cascade achievements
 
 # …or just run `cascade` for the full interactive UI.
 cascade
@@ -152,6 +166,7 @@ once, and every hit after that will feel honest.
 | <kbd>Esc</kbd> | Back |
 | <kbd>Tab</kbd> | Cycle difficulty (song select) |
 | <kbd>s</kbd> | Cycle sort: Title / Artist / Recently added / BPM (song select) |
+| <kbd>m</kbd> | Toggle modifiers overlay: Hidden / Flashlight / Sudden Death / Perfect Only |
 | <kbd>/</kbd> | Search (song select) |
 | <kbd>r</kbd> | Rename selected song (song select) |
 | <kbd>i</kbd> | Import audio file (song select) |
@@ -199,7 +214,34 @@ fps = 60
 ```
 
 Imported songs + generated beatmaps + best scores live under
-`~/.cascade/songs/` and `~/.cascade/scores.json`.
+`~/.cascade/songs/`, `~/.cascade/scores.json`, and `~/.cascade/achievements.json`.
+
+## Modifiers
+
+Press <kbd>m</kbd> in song select to toggle modifiers, or pass `--mods` on the
+CLI. Each `(difficulty + mods)` combination gets its own best-score slot, so a
+clean Hard run and a Hard + Hidden + Sudden Death run are tracked separately.
+
+| Code | Name | Effect |
+|------|------|--------|
+| `hd` | Hidden | Notes appear only close to the hit zone. |
+| `fl` | Flashlight | Highway is dark except a narrow band around the hit zone. |
+| `sd` | Sudden Death | The first miss ends the run immediately. |
+| `po` | Perfect Only | Anything below Perfect counts as a Miss. |
+
+```sh
+cascade play my-favorite-song --hard --mods hd,fl
+```
+
+## Achievements
+
+Twelve unlockable achievements ship with the game — full combos, grade
+milestones, and clearing songs with each modifier. The unlock list lives at
+`~/.cascade/achievements.json` and you can see your progress with:
+
+```sh
+cascade achievements
+```
 
 ## How the beatmap generator works
 

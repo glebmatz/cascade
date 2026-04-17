@@ -81,7 +81,9 @@ impl GameState {
 
     pub fn grade(&self) -> &'static str {
         let acc = self.accuracy();
-        if acc >= 95.0 {
+        if acc >= 100.0 {
+            "SS"
+        } else if acc >= 95.0 {
             "S"
         } else if acc >= 90.0 {
             "A"

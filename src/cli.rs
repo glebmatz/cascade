@@ -1,11 +1,13 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
+use crate::achievements::{AchievementId, AchievementStore};
 use crate::audio::{analyzer, import, metadata};
 use crate::beatmap::types::{Beatmap, Difficulty, SongMeta};
 use crate::beatmap::{generator, loader};
 use crate::config::Config;
 use crate::score_store::ScoreStore;
+use crate::score_store::decompose_key;
 use crate::screens::song_select::find_audio_file;
 
 pub fn parse_difficulty_flag(args: &[String]) -> Option<Difficulty> {
@@ -39,8 +41,12 @@ pub fn print_help() -> Result<()> {
          cascade                         Launch the interactive UI\n  \
          cascade add <path>              Import an audio file and generate beatmaps\n  \
          cascade list                    List all imported songs with best scores\n  \
-         cascade play <slug> [--diff]    Launch straight into gameplay\n                                  \
-         --easy / --medium / --hard / --expert\n  \
+         cascade song <slug>             Show detailed stats for one song (all mods/diffs)\n  \
+         cascade play <slug> [--diff] [--mods CODES]\n                                  \
+         Launch straight into gameplay\n                                  \
+         --easy / --medium / --hard / --expert\n                                  \
+         --mods hd,fl,sd,po (Hidden/Flashlight/SuddenDeath/PerfectOnly)\n  \
+         cascade achievements            List all achievements with unlock status\n  \
          cascade regen                   Regenerate beatmaps for every imported song\n  \
          cascade rename <slug> [--title NAME] [--artist NAME]\n                                  \
          Edit a song's title or artist\n  \
@@ -139,6 +145,96 @@ pub fn list() -> Result<()> {
         }
     }
     println!("\nUse `cascade play <slug> --hard` to play.");
+    Ok(())
+}
+
+pub fn song(slug: &str) -> Result<()> {
+    let songs_dir = Config::cascade_dir().join("songs");
+    let dir = songs_dir.join(slug);
+    if !dir.is_dir() {
+        anyhow::bail!(
+            "Song '{}' not found. Use `cascade list` to see imported songs.",
+            slug
+        );
+    }
+
+    let (title, artist) = read_title_artist(&dir).unwrap_or((slug.to_string(), String::new()));
+    let (bpm, duration_ms) = read_bpm_duration(&dir);
+    let scores = ScoreStore::load(&Config::cascade_dir().join("scores.json"));
+
+    let display = if artist.is_empty() {
+        title.clone()
+    } else {
+        format!("{} — {}", artist, title)
+    };
+    println!("{}", display);
+    println!("{}", "─".repeat(display.chars().count().max(40)));
+    println!("  slug:     {}", slug);
+    println!("  bpm:      {}", bpm);
+    println!(
+        "  length:   {}:{:02}",
+        duration_ms / 60_000,
+        (duration_ms / 1000) % 60
+    );
+
+    println!();
+    println!("Note counts:");
+    for d in Difficulty::all() {
+        let p = dir.join(d.filename());
+        let count = std::fs::read_to_string(&p)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Beatmap>(&s).ok())
+            .map(|bm| bm.notes.len())
+            .unwrap_or(0);
+        if count > 0 {
+            println!("  {:<8}{:>5} notes", d.to_string().to_uppercase(), count);
+        }
+    }
+
+    println!();
+    println!("Best scores:");
+    let entries: Vec<(&String, &crate::score_store::BestScore)> =
+        scores.all_for_song(slug).collect();
+    if entries.is_empty() {
+        println!("  (none yet — go play this song!)");
+    } else {
+        let mut sorted: Vec<_> = entries.into_iter().collect();
+        sorted.sort_by_key(|(k, _)| k.to_string());
+        for (key, bs) in sorted {
+            let (diff, mods) = decompose_key(key);
+            let mod_label = if mods.is_empty() {
+                String::new()
+            } else {
+                format!("  +[{}]", mods.to_uppercase())
+            };
+            println!(
+                "  {:<8}{:>10}  {:>5.1}%  {:>4} combo  grade {}{}",
+                diff.to_uppercase(),
+                bs.score,
+                bs.accuracy,
+                bs.max_combo,
+                bs.grade,
+                mod_label,
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn achievements_list() -> Result<()> {
+    let path = Config::cascade_dir().join("achievements.json");
+    let store = AchievementStore::load(&path);
+    let total = AchievementId::ALL.len();
+    let unlocked = AchievementId::ALL
+        .iter()
+        .filter(|id| store.is_unlocked(**id))
+        .count();
+
+    println!("Achievements: {}/{} unlocked\n", unlocked, total);
+    for id in AchievementId::ALL {
+        let mark = if store.is_unlocked(*id) { "★" } else { " " };
+        println!("  {}  {:<20} {}", mark, id.name(), id.description());
+    }
     Ok(())
 }
 

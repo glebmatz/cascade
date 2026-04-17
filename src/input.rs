@@ -17,6 +17,7 @@ pub fn map_key_menu(key: KeyEvent) -> Action {
         KeyCode::Char('x') | KeyCode::Delete => Action::Delete,
         KeyCode::Char('r') => Action::Rename,
         KeyCode::Char('s') => Action::Sort,
+        KeyCode::Char('m') => Action::Mods,
         _ => Action::None,
     }
 }

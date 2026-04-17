@@ -2,6 +2,7 @@
 #![allow(clippy::question_mark)]
 #![allow(clippy::while_let_loop)]
 
+mod achievements;
 mod app;
 mod audio;
 mod beatmap;
@@ -28,6 +29,7 @@ use crossterm::{
 };
 use ratatui::prelude::*;
 
+use achievements::AchievementStore;
 use app::{Action, App, Screen};
 use audio::sfx::{self, SfxPlayer};
 use beatmap::types::Difficulty;
@@ -50,6 +52,8 @@ fn main() -> Result<()> {
         match args[1].as_str() {
             "add" if args.len() >= 3 => return cli::add(&args[2]),
             "list" | "ls" => return cli::list(),
+            "song" if args.len() >= 3 => return cli::song(&args[2]),
+            "achievements" => return cli::achievements_list(),
             "regen" => return cli::regen(),
             "rename" if args.len() >= 3 => {
                 let slug = &args[2];
@@ -64,7 +68,10 @@ fn main() -> Result<()> {
             "play" if args.len() >= 3 => {
                 let slug = args[2].clone();
                 let difficulty = cli::parse_difficulty_flag(&args[3..]);
-                return run_interactive(Some((slug, difficulty)));
+                let mods = cli::extract_flag(&args[3..], "--mods")
+                    .map(|s| game::modifiers::Mods::from_codes(&s))
+                    .unwrap_or_default();
+                return run_interactive(Some((slug, difficulty, mods)));
             }
             "help" | "--help" | "-h" => return cli::print_help(),
             _ => {}
@@ -74,7 +81,9 @@ fn main() -> Result<()> {
     run_interactive(None)
 }
 
-fn run_interactive(start_song: Option<(String, Option<Difficulty>)>) -> Result<()> {
+fn run_interactive(
+    start_song: Option<(String, Option<Difficulty>, game::modifiers::Mods)>,
+) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -111,6 +120,8 @@ struct Session {
     songs_dir: PathBuf,
     scores_path: PathBuf,
     scores: ScoreStore,
+    achievements_path: PathBuf,
+    achievements: AchievementStore,
     sfx: Option<SfxPlayer>,
 
     app: App,
@@ -135,6 +146,8 @@ impl Session {
 
         let sfx = SfxPlayer::new((config.audio.volume as f32 * 0.6).clamp(0.0, 1.0)).ok();
         let scores = ScoreStore::load(&scores_path);
+        let achievements_path = Config::cascade_dir().join("achievements.json");
+        let achievements = AchievementStore::load(&achievements_path);
 
         let initial_difficulty = match config.gameplay.difficulty.as_str() {
             "easy" => Difficulty::Easy,
@@ -151,6 +164,8 @@ impl Session {
             songs_dir,
             scores_path,
             scores,
+            achievements_path,
+            achievements,
             sfx,
             app: App::new(),
             menu: MenuScreen::new(),
@@ -168,14 +183,20 @@ impl Session {
     fn record_score(&mut self, gp: &GameplayScreen) -> (Option<BestScore>, bool) {
         let slug = cli::song_slug_from_path(&self.last_beatmap_path);
         let diff_name = gp.beatmap.difficulty.to_string();
-        let prev = self.scores.get(&slug, &diff_name).cloned();
+        let mods_key = gp.mods.storage_key();
+        let prev = self
+            .scores
+            .get_with_mods(&slug, &diff_name, &mods_key)
+            .cloned();
         let new_record = BestScore {
             score: gp.state.score,
             max_combo: gp.state.max_combo,
             accuracy: gp.state.accuracy(),
             grade: gp.state.grade().to_string(),
         };
-        let is_best = self.scores.update_if_best(&slug, &diff_name, new_record);
+        let is_best = self
+            .scores
+            .update_if_best_with_mods(&slug, &diff_name, &mods_key, new_record);
         if is_best {
             let _ = self.scores.save(&self.scores_path);
         }
@@ -188,12 +209,18 @@ impl Session {
         };
         let (prev_best, is_best) = self.record_score(&gp);
         let diff_name = gp.beatmap.difficulty.to_string();
+        let unlocked = self.achievements.check(&gp.state, &diff_name, &gp.mods);
+        if !unlocked.is_empty() {
+            let _ = self.achievements.save(&self.achievements_path);
+        }
         self.results = Some(ResultsScreen::new(
             gp.state,
             self.last_song_title.clone(),
             diff_name,
             prev_best,
             is_best,
+            unlocked,
+            gp.mods,
         ));
     }
 
@@ -260,6 +287,7 @@ impl Session {
             self.config.audio.volume,
             self.config.gameplay.health_enabled,
             self.config.gameplay.holds_enabled,
+            self.song_select.mods.clone(),
         )?;
         gp.start();
         self.gameplay = Some(gp);
@@ -269,11 +297,11 @@ impl Session {
 
 fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    start_song: Option<(String, Option<Difficulty>)>,
+    start_song: Option<(String, Option<Difficulty>, game::modifiers::Mods)>,
 ) -> Result<()> {
     let mut session = Session::load()?;
 
-    if let Some((slug, diff)) = start_song {
+    if let Some((slug, diff, mods)) = start_song {
         match session
             .song_select
             .songs
@@ -284,6 +312,7 @@ fn run(
                 if let Some(d) = diff {
                     session.song_select.difficulty = d;
                 }
+                session.song_select.mods = mods;
                 session.song_select.selected = session
                     .song_select
                     .filtered_indices
@@ -344,6 +373,12 @@ fn process_input(
         if session.app.screen == Screen::SongSelect
             && session.song_select.rename_mode
             && session.song_select.handle_rename_key(key.code)
+        {
+            continue;
+        }
+        if session.app.screen == Screen::SongSelect
+            && session.song_select.mods_overlay
+            && session.song_select.handle_mods_key(key.code)
         {
             continue;
         }
