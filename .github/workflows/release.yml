@@ -153,6 +153,7 @@ jobs:
           SHA_DARWIN_X64:   ${{ needs.release.outputs.sha256_darwin_x64 }}
           SHA_LINUX_X64:    ${{ needs.release.outputs.sha256_linux_x64 }}
         run: |
+          mkdir -p tap/Formula
           cat > tap/Formula/cascade.rb <<EOF
           class Cascade < Formula
             desc "Terminal rhythm game with automatic beatmap generation"
