@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
 
 use crate::achievements::{AchievementId, AchievementStore};
@@ -6,6 +6,7 @@ use crate::audio::{analyzer, import, metadata};
 use crate::beatmap::types::{Beatmap, Difficulty, SongMeta};
 use crate::beatmap::{generator, loader};
 use crate::config::Config;
+use crate::game::practice::{self, PracticeSettings};
 use crate::score_store::ScoreStore;
 use crate::score_store::decompose_key;
 use crate::screens::song_select::find_audio_file;
@@ -26,6 +27,68 @@ pub fn extract_flag(args: &[String], flag: &str) -> Option<String> {
     args.get(pos + 1).cloned()
 }
 
+/// Parse `MM:SS` into milliseconds. Minutes can exceed 59 (for long tracks),
+/// but seconds must be `00..=59`.
+pub fn parse_mmss(s: &str) -> Result<u64> {
+    let (m, sec) = s
+        .split_once(':')
+        .ok_or_else(|| anyhow!("expected MM:SS, got `{s}`"))?;
+    let minutes: u64 = m
+        .parse()
+        .map_err(|_| anyhow!("minutes must be a number, got `{m}`"))?;
+    let seconds: u64 = sec
+        .parse()
+        .map_err(|_| anyhow!("seconds must be a number, got `{sec}`"))?;
+    if seconds > 59 {
+        return Err(anyhow!("seconds must be 0..=59, got {seconds}"));
+    }
+    Ok((minutes * 60 + seconds) * 1000)
+}
+
+/// Parse `MM:SS-MM:SS` into `(start_ms, end_ms)`, ensuring `start < end`.
+pub fn parse_section(s: &str) -> Result<(u64, u64)> {
+    let (a, b) = s
+        .split_once('-')
+        .ok_or_else(|| anyhow!("expected MM:SS-MM:SS, got `{s}`"))?;
+    let start = parse_mmss(a)?;
+    let end = parse_mmss(b)?;
+    if start >= end {
+        return Err(anyhow!("section start must be before end: {a} < {b}"));
+    }
+    Ok((start, end))
+}
+
+/// Parse a speed multiplier, clamping into the supported range.
+pub fn parse_speed(s: &str) -> Result<f32> {
+    let v: f32 = s
+        .parse()
+        .map_err(|_| anyhow!("speed must be a number, got `{s}`"))?;
+    if !v.is_finite() || v <= 0.0 {
+        return Err(anyhow!("speed must be positive, got {v}"));
+    }
+    Ok(practice::clamp_speed(v))
+}
+
+/// Pull `--section` and `--speed` out of argv and build a [`PracticeSettings`].
+/// Returns `Ok(None)` when neither flag is present.
+pub fn extract_practice(args: &[String]) -> Result<Option<PracticeSettings>> {
+    let section = extract_flag(args, "--section");
+    let speed = extract_flag(args, "--speed");
+    if section.is_none() && speed.is_none() {
+        return Ok(None);
+    }
+    let mut settings = PracticeSettings::default();
+    if let Some(s) = section {
+        let (start, end) = parse_section(&s)?;
+        settings.section_start_ms = Some(start);
+        settings.section_end_ms = Some(end);
+    }
+    if let Some(s) = speed {
+        settings.speed = parse_speed(&s)?;
+    }
+    Ok(Some(settings))
+}
+
 pub fn song_slug_from_path(p: &Option<PathBuf>) -> String {
     p.as_ref()
         .and_then(|bp| bp.parent())
@@ -42,10 +105,13 @@ pub fn print_help() -> Result<()> {
          cascade add <path>              Import an audio file and generate beatmaps\n  \
          cascade list                    List all imported songs with best scores\n  \
          cascade song <slug>             Show detailed stats for one song (all mods/diffs)\n  \
-         cascade play <slug> [--diff] [--mods CODES]\n                                  \
+         cascade play <slug> [--diff] [--mods CODES] [--section RANGE] [--speed N]\n                                  \
          Launch straight into gameplay\n                                  \
          --easy / --medium / --hard / --expert\n                                  \
-         --mods hd,fl,sd,po (Hidden/Flashlight/SuddenDeath/PerfectOnly)\n  \
+         --mods hd,fl,sd,po (Hidden/Flashlight/SuddenDeath/PerfectOnly)\n                                  \
+         --section MM:SS-MM:SS  practice: loop a section\n                                  \
+         --speed 0.25..2.0      practice: slow down / speed up\n                                  \
+         (practice ignores mods and does not save scores)\n  \
          cascade achievements            List all achievements with unlock status\n  \
          cascade regen                   Regenerate beatmaps for every imported song\n  \
          cascade rename <slug> [--title NAME] [--artist NAME]\n                                  \

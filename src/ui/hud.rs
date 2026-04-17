@@ -5,6 +5,7 @@ use ratatui::widgets::Widget;
 pub struct HudTop<'a> {
     pub state: &'a GameState,
     pub health_enabled: bool,
+    pub practice_label: Option<&'a str>,
 }
 
 impl<'a> Widget for HudTop<'a> {
@@ -69,6 +70,22 @@ impl<'a> Widget for HudTop<'a> {
             &score_text,
             Style::default().fg(Color::Rgb(180, 180, 180)),
         );
+
+        // Practice badge: rendered to the right of SCORE when terminal is wide
+        // enough. Amber, bold. Hidden on narrow layouts to keep SCORE readable.
+        if let Some(label) = self.practice_label {
+            let badge = format!("PRACTICE {}", label);
+            let bw = badge.chars().count() as u16;
+            let badge_x = score_x + score_text.len() as u16 + 3;
+            if badge_x + bw < area.x + area.width {
+                buf.set_string(
+                    badge_x,
+                    area.y,
+                    &badge,
+                    Style::default().fg(Color::Rgb(255, 180, 80)).bold(),
+                );
+            }
+        }
     }
 }
 

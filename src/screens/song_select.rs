@@ -1,6 +1,7 @@
 use crate::app::{Action, Screen};
 use crate::beatmap::types::{Beatmap, Difficulty};
 use crate::game::modifiers::Mods;
+use crate::game::practice::{self, PracticeSettings};
 use crate::score_store::ScoreStore;
 use crate::ui::chrome::{
     difficulty_color, render_bottom_bar, render_difficulty_dots, render_top_bar,
@@ -69,12 +70,25 @@ pub struct SongSelectScreen {
     pub rename_field: RenameField,
     pub mods: Mods,
     pub mods_overlay: bool,
+    pub practice: PracticeSettings,
+    pub practice_overlay: bool,
+    pub practice_focus: PracticeField,
+    /// Digits-only buffer for the focused MM:SS field while typing.
+    pub practice_buf: String,
+    pub practice_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenameField {
     Title,
     Artist,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PracticeField {
+    Start,
+    End,
+    Speed,
 }
 
 impl SongSelectScreen {
@@ -96,6 +110,11 @@ impl SongSelectScreen {
             rename_field: RenameField::Title,
             mods: Mods::new(),
             mods_overlay: false,
+            practice: PracticeSettings::new(),
+            practice_overlay: false,
+            practice_focus: PracticeField::Start,
+            practice_buf: String::new(),
+            practice_error: None,
         }
     }
 
@@ -305,7 +324,12 @@ impl SongSelectScreen {
     }
 
     pub fn handle_action(&mut self, action: Action) -> Option<Action> {
-        if self.import_mode || self.search_mode || self.rename_mode || self.mods_overlay {
+        if self.import_mode
+            || self.search_mode
+            || self.rename_mode
+            || self.mods_overlay
+            || self.practice_overlay
+        {
             return None;
         }
         match action {
@@ -342,6 +366,10 @@ impl SongSelectScreen {
             }
             Action::Mods => {
                 self.mods_overlay = true;
+                None
+            }
+            Action::Practice => {
+                self.open_practice_overlay();
                 None
             }
             Action::Delete => {
@@ -408,6 +436,221 @@ impl SongSelectScreen {
                 true
             }
             _ => false,
+        }
+    }
+
+    fn open_practice_overlay(&mut self) {
+        // Prefill an unset end to the current song's duration so the overlay
+        // opens in a valid state (full song, no override).
+        if self.practice.section_end_ms.is_none()
+            && let Some(duration) = self.selected_song_duration_ms()
+        {
+            self.practice.section_end_ms = Some(duration);
+        }
+        if self.practice.section_start_ms.is_none() {
+            self.practice.section_start_ms = Some(0);
+        }
+        self.practice_focus = PracticeField::Start;
+        self.practice_buf = digits_for_mmss(self.practice.section_start_ms.unwrap_or(0));
+        self.practice_error = None;
+        self.practice_overlay = true;
+    }
+
+    fn close_practice_overlay(&mut self, apply: bool) {
+        if apply {
+            self.commit_practice_buf();
+            if let Some(err) = self.validate_practice() {
+                self.practice_error = Some(err);
+                return;
+            }
+            // Collapse a "full song / no speed change" config back to inactive
+            // so the badge doesn't stay on when user effectively cleared it.
+            if self.practice_looks_like_default() {
+                self.practice.clear();
+            }
+        }
+        self.practice_overlay = false;
+        self.practice_error = None;
+        self.practice_buf.clear();
+    }
+
+    fn practice_looks_like_default(&self) -> bool {
+        let start_zero = self.practice.section_start_ms == Some(0);
+        let end_at_duration = match (self.practice.section_end_ms, self.selected_song_duration_ms())
+        {
+            (Some(end), Some(dur)) => end >= dur,
+            _ => false,
+        };
+        let speed_default = (self.practice.speed - 1.0).abs() < 0.001;
+        start_zero && end_at_duration && speed_default
+    }
+
+    fn commit_practice_buf(&mut self) {
+        match self.practice_focus {
+            PracticeField::Start => {
+                if let Some(ms) = mmss_from_digits(&self.practice_buf) {
+                    self.practice.section_start_ms = Some(ms);
+                }
+            }
+            PracticeField::End => {
+                if let Some(ms) = mmss_from_digits(&self.practice_buf) {
+                    self.practice.section_end_ms = Some(ms);
+                }
+            }
+            PracticeField::Speed => {
+                if let Ok(v) = self.practice_buf.parse::<f32>() {
+                    self.practice.speed = practice::clamp_speed(v);
+                }
+            }
+        }
+    }
+
+    fn validate_practice(&self) -> Option<String> {
+        let duration = self.selected_song_duration_ms();
+        let start = self.practice.section_start_ms.unwrap_or(0);
+        let end = self.practice.section_end_ms.unwrap_or(u64::MAX);
+        if let Some(d) = duration
+            && start >= d
+        {
+            return Some(format!(
+                "Start ({}) is past song length ({})",
+                practice::format_mmss(start),
+                practice::format_mmss(d),
+            ));
+        }
+        if end <= start {
+            return Some("Section end must be after start".to_string());
+        }
+        None
+    }
+
+    /// Arrow-key nudging. Start/End step by one second; Speed steps by 0.05.
+    /// `dir` is `-1` for left, `+1` for right.
+    fn nudge_focused(&mut self, dir: i64) {
+        const STEP_MS: i64 = 1_000;
+        let duration = self.selected_song_duration_ms();
+        match self.practice_focus {
+            PracticeField::Start => {
+                let cur = self.practice.section_start_ms.unwrap_or(0) as i64;
+                let upper = self
+                    .practice
+                    .section_end_ms
+                    .map(|e| e.saturating_sub(1_000) as i64)
+                    .unwrap_or(i64::MAX);
+                let next = (cur + dir * STEP_MS).max(0).min(upper) as u64;
+                self.practice.section_start_ms = Some(next);
+            }
+            PracticeField::End => {
+                let cur = self
+                    .practice
+                    .section_end_ms
+                    .or(duration)
+                    .unwrap_or(0) as i64;
+                let lower = self
+                    .practice
+                    .section_start_ms
+                    .map(|s| (s + 1_000) as i64)
+                    .unwrap_or(1_000);
+                let upper = duration.map(|d| d as i64).unwrap_or(i64::MAX);
+                let next = (cur + dir * STEP_MS).max(lower).min(upper) as u64;
+                self.practice.section_end_ms = Some(next);
+            }
+            PracticeField::Speed => {
+                self.practice.step_speed(dir as f32 * practice::SPEED_STEP);
+            }
+        }
+    }
+
+    fn load_buf_for_focus(&mut self) {
+        self.practice_buf = match self.practice_focus {
+            PracticeField::Start => digits_for_mmss(self.practice.section_start_ms.unwrap_or(0)),
+            PracticeField::End => digits_for_mmss(
+                self.practice
+                    .section_end_ms
+                    .or(self.selected_song_duration_ms())
+                    .unwrap_or(0),
+            ),
+            PracticeField::Speed => format!("{:.2}", self.practice.speed),
+        };
+    }
+
+    fn selected_song_duration_ms(&self) -> Option<u64> {
+        self.real_index()
+            .and_then(|i| self.songs.get(i))
+            .map(|s| s.duration_ms)
+    }
+
+    pub fn handle_practice_key(&mut self, code: KeyCode) -> bool {
+        if !self.practice_overlay {
+            return false;
+        }
+        self.practice_error = None;
+        match code {
+            KeyCode::Esc => {
+                self.close_practice_overlay(false);
+                true
+            }
+            KeyCode::Enter => {
+                self.close_practice_overlay(true);
+                true
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                self.practice.clear();
+                self.load_buf_for_focus();
+                true
+            }
+            KeyCode::Tab | KeyCode::Down => {
+                self.commit_practice_buf();
+                self.practice_focus = match self.practice_focus {
+                    PracticeField::Start => PracticeField::End,
+                    PracticeField::End => PracticeField::Speed,
+                    PracticeField::Speed => PracticeField::Start,
+                };
+                self.load_buf_for_focus();
+                true
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                self.commit_practice_buf();
+                self.practice_focus = match self.practice_focus {
+                    PracticeField::Start => PracticeField::Speed,
+                    PracticeField::End => PracticeField::Start,
+                    PracticeField::Speed => PracticeField::End,
+                };
+                self.load_buf_for_focus();
+                true
+            }
+            KeyCode::Left => {
+                self.commit_practice_buf();
+                self.nudge_focused(-1);
+                self.load_buf_for_focus();
+                true
+            }
+            KeyCode::Right => {
+                self.commit_practice_buf();
+                self.nudge_focused(1);
+                self.load_buf_for_focus();
+                true
+            }
+            KeyCode::Backspace => {
+                self.practice_buf.pop();
+                true
+            }
+            KeyCode::Char(ch) => {
+                match self.practice_focus {
+                    PracticeField::Start | PracticeField::End => {
+                        if ch.is_ascii_digit() && self.practice_buf.len() < 4 {
+                            self.practice_buf.push(ch);
+                        }
+                    }
+                    PracticeField::Speed => {
+                        if (ch.is_ascii_digit() || ch == '.') && self.practice_buf.len() < 5 {
+                            self.practice_buf.push(ch);
+                        }
+                    }
+                }
+                true
+            }
+            _ => true,
         }
     }
 
@@ -503,12 +746,22 @@ impl SongSelectScreen {
             ]
         } else if self.mods_overlay {
             &[("H/F/S/P", "toggle"), ("C", "clear all"), ("Esc", "close")]
+        } else if self.practice_overlay {
+            &[
+                ("Tab", "next field"),
+                ("←/→", "nudge ±1s / ±0.05"),
+                ("digits", "type value"),
+                ("C", "clear"),
+                ("Enter", "apply"),
+                ("Esc", "close"),
+            ]
         } else {
             &[
                 ("↵", "play"),
                 ("Tab", "difficulty"),
-                ("s", "sort"),
+                ("p", "practice"),
                 ("m", "mods"),
+                ("s", "sort"),
                 ("/", "search"),
                 ("i", "import"),
                 ("r", "rename"),
@@ -581,6 +834,25 @@ impl SongSelectScreen {
             );
         }
 
+        // Practice badge: shown whenever practice is active.
+        if let Some(duration) = self.selected_song_duration_ms()
+            && let Some(badge_core) = self.practice.badge(duration)
+        {
+            let suffix = if !self.mods.is_empty() {
+                " (mods off)"
+            } else {
+                ""
+            };
+            let badge = format!("Practice: {}{}", badge_core, suffix);
+            let bw = badge.chars().count() as u16;
+            buf.set_string(
+                area.x + area.width.saturating_sub(bw + 2),
+                area.y + 5,
+                &badge,
+                Style::default().fg(Color::Rgb(255, 180, 80)).bold(),
+            );
+        }
+
         if self.import_mode {
             let prompt = format!("Path to audio file: {}_", self.import_input);
             let x = area.x + 4;
@@ -625,6 +897,169 @@ impl SongSelectScreen {
         if self.mods_overlay {
             self.render_mods_overlay(buf, area);
         }
+        if self.practice_overlay {
+            self.render_practice_overlay(buf, area);
+        }
+    }
+
+    fn render_practice_overlay(&self, buf: &mut Buffer, area: Rect) {
+        let cx = area.x + area.width / 2;
+        let cy = area.y + area.height / 2;
+        let w: u16 = 64u16.min(area.width.saturating_sub(4)).max(48);
+        let h: u16 = 12;
+        let x = cx.saturating_sub(w / 2);
+        let y = cy.saturating_sub(h / 2);
+
+        let bg = Color::Rgb(20, 20, 28);
+        for dy in 0..h {
+            for dx in 0..w {
+                buf.set_string(x + dx, y + dy, " ", Style::default().bg(bg));
+            }
+        }
+        for dx in 0..w {
+            buf.set_string(
+                x + dx,
+                y,
+                "─",
+                Style::default().fg(Color::Rgb(80, 80, 100)).bg(bg),
+            );
+            buf.set_string(
+                x + dx,
+                y + h - 1,
+                "─",
+                Style::default().fg(Color::Rgb(80, 80, 100)).bg(bg),
+            );
+        }
+
+        let header = "PRACTICE MODE";
+        buf.set_string(
+            cx - header.len() as u16 / 2,
+            y + 1,
+            header,
+            Style::default().fg(Color::White).bg(bg).bold(),
+        );
+
+        let subtitle = "loop a section • slow it down • no score saved";
+        let sw = subtitle.chars().count() as u16;
+        buf.set_string(
+            cx.saturating_sub(sw / 2),
+            y + 2,
+            subtitle,
+            Style::default().fg(Color::Rgb(130, 130, 140)).bg(bg),
+        );
+
+        let start_ms = self.practice.section_start_ms.unwrap_or(0);
+        let end_ms = self
+            .practice
+            .section_end_ms
+            .or(self.selected_song_duration_ms())
+            .unwrap_or(0);
+        let field_row = |buf: &mut Buffer,
+                         row: u16,
+                         label: &str,
+                         value: String,
+                         focused: bool,
+                         hint: &str| {
+            let label_color = Color::Rgb(160, 160, 180);
+            let (value_color, bracket_color) = if focused {
+                (Color::White, Color::Rgb(255, 200, 120))
+            } else {
+                (Color::Rgb(180, 180, 180), Color::Rgb(90, 90, 100))
+            };
+            buf.set_string(
+                x + 4,
+                row,
+                label,
+                Style::default().fg(label_color).bg(bg).bold(),
+            );
+            buf.set_string(
+                x + 14,
+                row,
+                "[",
+                Style::default().fg(bracket_color).bg(bg),
+            );
+            buf.set_string(
+                x + 15,
+                row,
+                &value,
+                Style::default().fg(value_color).bg(bg).bold(),
+            );
+            let close_x = x + 15 + value.chars().count() as u16;
+            buf.set_string(close_x, row, "]", Style::default().fg(bracket_color).bg(bg));
+            if focused {
+                buf.set_string(
+                    x + 2,
+                    row,
+                    "▸",
+                    Style::default().fg(Color::Rgb(255, 200, 120)).bg(bg).bold(),
+                );
+            }
+            let hint_x = close_x + 2;
+            if hint_x + hint.chars().count() as u16 + 2 < x + w {
+                buf.set_string(
+                    hint_x,
+                    row,
+                    hint,
+                    Style::default().fg(Color::Rgb(110, 110, 120)).bg(bg),
+                );
+            }
+        };
+
+        let start_value = if matches!(self.practice_focus, PracticeField::Start) {
+            format_typed_mmss(&self.practice_buf, true)
+        } else {
+            practice::format_mmss(start_ms)
+        };
+        let end_value = if matches!(self.practice_focus, PracticeField::End) {
+            format_typed_mmss(&self.practice_buf, true)
+        } else {
+            practice::format_mmss(end_ms)
+        };
+        let speed_value = if matches!(self.practice_focus, PracticeField::Speed) {
+            format!("{}_", self.practice_buf)
+        } else {
+            format!("{:.2}×", self.practice.speed)
+        };
+
+        field_row(
+            buf,
+            y + 4,
+            "Section",
+            start_value,
+            matches!(self.practice_focus, PracticeField::Start),
+            "←/→ ±1s",
+        );
+        field_row(
+            buf,
+            y + 5,
+            "to",
+            end_value,
+            matches!(self.practice_focus, PracticeField::End),
+            "←/→ ±1s",
+        );
+        field_row(
+            buf,
+            y + 7,
+            "Speed",
+            speed_value,
+            matches!(self.practice_focus, PracticeField::Speed),
+            "←/→ ±0.05",
+        );
+
+        let status = if let Some(err) = &self.practice_error {
+            (err.as_str(), Color::Rgb(255, 120, 120))
+        } else if self.practice.is_active() {
+            ("✓ practice active", Color::Rgb(120, 220, 140))
+        } else {
+            ("practice inactive (full song, no speed change)", Color::Rgb(110, 110, 120))
+        };
+        let sw = status.0.chars().count() as u16;
+        buf.set_string(
+            cx.saturating_sub(sw / 2),
+            y + h - 2,
+            status.0,
+            Style::default().fg(status.1).bg(bg),
+        );
     }
 
     fn render_mods_overlay(&self, buf: &mut Buffer, area: Rect) {
@@ -919,6 +1354,38 @@ impl SongSelectScreen {
             drawn += row_h;
         }
     }
+}
+
+/// `"01:30"` → `"0130"`. Drops the colon so typing is a single buffer.
+fn digits_for_mmss(ms: u64) -> String {
+    let total = ms / 1000;
+    let mm = total / 60;
+    let ss = total % 60;
+    format!("{:02}{:02}", mm.min(99), ss)
+}
+
+/// Render the digit buffer in `MM:SS` form with a trailing cursor if active.
+fn format_typed_mmss(digits: &str, with_cursor: bool) -> String {
+    let padded = format!("{:0>4}", digits);
+    let (mm, ss) = padded.split_at(2);
+    let cursor = if with_cursor { "_" } else { "" };
+    format!("{}:{}{}", mm, ss, cursor)
+}
+
+/// Parse a typed digit buffer (up to 4 chars, auto-padded) back to ms.
+/// `""` → 0, `"1"` → 00:01, `"30"` → 00:30, `"130"` → 01:30, `"0130"` → 01:30.
+fn mmss_from_digits(buf: &str) -> Option<u64> {
+    if buf.is_empty() {
+        return Some(0);
+    }
+    let padded = format!("{:0>4}", buf);
+    let (mm, ss) = padded.split_at(2);
+    let m: u64 = mm.parse().ok()?;
+    let s: u64 = ss.parse().ok()?;
+    if s > 59 {
+        return None;
+    }
+    Some((m * 60 + s) * 1000)
 }
 
 /// Find audio file in a song directory. Supports mp3, m4a, webm, opus, ogg, wav, flac.

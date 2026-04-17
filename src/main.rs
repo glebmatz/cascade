@@ -71,7 +71,19 @@ fn main() -> Result<()> {
                 let mods = cli::extract_flag(&args[3..], "--mods")
                     .map(|s| game::modifiers::Mods::from_codes(&s))
                     .unwrap_or_default();
-                return run_interactive(Some((slug, difficulty, mods)));
+                let practice = match cli::extract_practice(&args[3..]) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                return run_interactive(Some(StartSong {
+                    slug,
+                    difficulty,
+                    mods,
+                    practice,
+                }));
             }
             "help" | "--help" | "-h" => return cli::print_help(),
             _ => {}
@@ -81,9 +93,14 @@ fn main() -> Result<()> {
     run_interactive(None)
 }
 
-fn run_interactive(
-    start_song: Option<(String, Option<Difficulty>, game::modifiers::Mods)>,
-) -> Result<()> {
+struct StartSong {
+    slug: String,
+    difficulty: Option<Difficulty>,
+    mods: game::modifiers::Mods,
+    practice: Option<game::practice::PracticeSettings>,
+}
+
+fn run_interactive(start_song: Option<StartSong>) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -207,6 +224,11 @@ impl Session {
         let Some(gp) = self.gameplay.take() else {
             return;
         };
+        // Practice runs don't count — no score, no achievements, no results screen.
+        if gp.is_practice() {
+            self.results = None;
+            return;
+        }
         let (prev_best, is_best) = self.record_score(&gp);
         let diff_name = gp.beatmap.difficulty.to_string();
         let unlocked = self.achievements.check(&gp.state, &diff_name, &gp.mods);
@@ -277,6 +299,16 @@ impl Session {
         let (samples, sample_rate) =
             audio::analyzer::decode_audio(&ap).unwrap_or_else(|_| (vec![], 44100));
 
+        // Practice neutralises mods and score/achievement persistence. A bad
+        // section (start past the song) silently drops practice rather than
+        // refusing to launch — users get the normal play instead.
+        let practice_config = self.song_select.practice.to_config(bm.song.duration_ms);
+        let mods = if practice_config.is_some() {
+            game::modifiers::Mods::new()
+        } else {
+            self.song_select.mods.clone()
+        };
+
         let mut gp = GameplayScreen::new(
             bm,
             &ap,
@@ -287,7 +319,8 @@ impl Session {
             self.config.audio.volume,
             self.config.gameplay.health_enabled,
             self.config.gameplay.holds_enabled,
-            self.song_select.mods.clone(),
+            mods,
+            practice_config,
         )?;
         gp.start();
         self.gameplay = Some(gp);
@@ -297,22 +330,25 @@ impl Session {
 
 fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    start_song: Option<(String, Option<Difficulty>, game::modifiers::Mods)>,
+    start_song: Option<StartSong>,
 ) -> Result<()> {
     let mut session = Session::load()?;
 
-    if let Some((slug, diff, mods)) = start_song {
+    if let Some(start) = start_song {
         match session
             .song_select
             .songs
             .iter()
-            .position(|s| s.slug == slug)
+            .position(|s| s.slug == start.slug)
         {
             Some(i) => {
-                if let Some(d) = diff {
+                if let Some(d) = start.difficulty {
                     session.song_select.difficulty = d;
                 }
-                session.song_select.mods = mods;
+                session.song_select.mods = start.mods;
+                if let Some(p) = start.practice {
+                    session.song_select.practice = p;
+                }
                 session.song_select.selected = session
                     .song_select
                     .filtered_indices
@@ -330,7 +366,7 @@ fn run(
                 session.app.navigate(Screen::Gameplay);
             }
             None => {
-                eprintln!("Song '{}' not found. Use `cascade list`.", slug);
+                eprintln!("Song '{}' not found. Use `cascade list`.", start.slug);
                 return Ok(());
             }
         }
@@ -379,6 +415,12 @@ fn process_input(
         if session.app.screen == Screen::SongSelect
             && session.song_select.mods_overlay
             && session.song_select.handle_mods_key(key.code)
+        {
+            continue;
+        }
+        if session.app.screen == Screen::SongSelect
+            && session.song_select.practice_overlay
+            && session.song_select.handle_practice_key(key.code)
         {
             continue;
         }
@@ -502,7 +544,15 @@ fn transition_to(
                 }
             }
         }
-        Screen::Results => session.finalize_to_results(),
+        Screen::Results => {
+            session.finalize_to_results();
+            // Practice exits directly to SongSelect — no results to show.
+            if session.results.is_none() {
+                session.song_select.scan_songs(&session.songs_dir);
+                session.app.navigate(Screen::SongSelect);
+                return Ok(());
+            }
+        }
         Screen::Settings => {
             let cfg = Config::load(&Config::default_path()).unwrap_or_default();
             session.settings = Some(SettingsScreen::new(cfg));

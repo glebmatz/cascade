@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-04-17
+
+### Added
+
+- **Practice mode** — loop a section of any song at any speed to drill the
+  parts you keep bailing on. Accessible from the CLI
+  (`cascade play <slug> --section 1:30-2:00 --speed 0.7`) or from song
+  select with <kbd>p</kbd>. Speed ranges 0.25× – 2.0× in 0.05 steps.
+  While practising, modifiers are disabled, no score or achievement is
+  recorded, and the song never auto-finishes — exit with <kbd>Esc</kbd> then
+  <kbd>Q</kbd>. A practice badge is visible both in song select and in the
+  top HUD during the run.
+- **Practice overlay** in song select: press <kbd>p</kbd> to dial in section
+  start/end and speed. <kbd>Tab</kbd> cycles fields; <kbd>←</kbd>/<kbd>→</kbd>
+  nudge the focused field (±1 s for section times, ±0.05 for speed); digits
+  type `MM:SS` directly; <kbd>C</kbd> clears.
+- **`AudioPlayer::seek_to_ms` / `set_speed`** — thin wrappers over `rodio`'s
+  `Sink::try_seek` and `set_speed`, used by practice-mode looping.
+
+### Internal
+
+- Gameplay time is now consistently expressed in *track-time* milliseconds
+  via a new `position_ms_in_track()` helper. A lint test guards against raw
+  uses of `self.audio.position_ms()` that would silently skip the practice
+  speed multiplier.
+
 ## [0.3.0] — 2026-04-17
 
 ### Added
@@ -106,7 +132,8 @@ First public release.
   `cascade regen`, `cascade help`.
 - **Dual MIT / Apache-2.0 licensing**.
 
-[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/glebmatz/cascade/releases/tag/v0.4.0
 [0.3.0]: https://github.com/glebmatz/cascade/releases/tag/v0.3.0
 [0.2.0]: https://github.com/glebmatz/cascade/releases/tag/v0.2.0
 [0.1.0]: https://github.com/glebmatz/cascade/releases/tag/v0.1.0

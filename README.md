@@ -34,6 +34,8 @@
   &nbsp;·&nbsp;
   <a href="#modifiers">Modifiers</a>
   &nbsp;·&nbsp;
+  <a href="#practice-mode">Practice</a>
+  &nbsp;·&nbsp;
   <a href="#how-the-beatmap-generator-works">How it works</a>
   &nbsp;·&nbsp;
   <a href="#contributing">Contribute</a>
@@ -59,6 +61,7 @@ hold-note release detection.
 - **Rich visuals** — half-block rendering, particle physics, starfield background, vignette, live spectrum bars, beat-synced receptor glow
 - **Synthesized hit feedback** — every judgement has its own click; menu navigation has its own sound
 - **Modifiers** — Hidden, Flashlight, Sudden Death, Perfect Only. Each combo gets its own best-score slot
+- **Practice mode** — loop any section at any speed from 0.25× to 2.0×, perfect for drilling that one run you keep bailing on
 - **Achievements** — 12 unlockables for combos, full clears, mod runs
 - **Best scores** — persisted per song / difficulty / mod combo
 - **Calibration** — built-in metronome calibrator removes audio latency drift
@@ -167,6 +170,7 @@ once, and every hit after that will feel honest.
 | <kbd>Tab</kbd> | Cycle difficulty (song select) |
 | <kbd>s</kbd> | Cycle sort: Title / Artist / Recently added / BPM (song select) |
 | <kbd>m</kbd> | Toggle modifiers overlay: Hidden / Flashlight / Sudden Death / Perfect Only |
+| <kbd>p</kbd> | Toggle practice overlay: loop a section, adjust speed |
 | <kbd>/</kbd> | Search (song select) |
 | <kbd>r</kbd> | Rename selected song (song select) |
 | <kbd>i</kbd> | Import audio file (song select) |
@@ -232,6 +236,42 @@ clean Hard run and a Hard + Hidden + Sudden Death run are tracked separately.
 ```sh
 cascade play my-favorite-song --hard --mods hd,fl
 ```
+
+## Practice mode
+
+Stuck on one part of a song? Practice mode loops a section of your choice
+at a speed of your choice. Score and achievements are **not** saved while
+practising — it's for learning, not for scoreboards.
+
+### From the CLI
+
+```sh
+# Loop 1:30 → 2:00 at 70% speed until it clicks.
+cascade play my-favorite-song --section 1:30-2:00 --speed 0.7
+
+# Full song, slowed down.
+cascade play my-favorite-song --speed 0.5
+
+# Any difficulty still applies.
+cascade play my-favorite-song --hard --section 1:30-2:00
+```
+
+### From the UI
+
+In song select, press <kbd>p</kbd> to open the practice overlay. <kbd>Tab</kbd>
+cycles fields, <kbd>←</kbd>/<kbd>→</kbd> nudges speed by 0.05, <kbd>C</kbd>
+clears, <kbd>Enter</kbd> applies, <kbd>Esc</kbd> closes. The practice badge
+stays visible in song select so you don't forget it's on, and mirrors in the
+top HUD during gameplay.
+
+Practice mode silently disables modifiers for the run — by design,
+distractions are not what you want while learning a pattern.
+
+### Known limits
+
+- Slowing down lowers the pitch (`rodio` doesn't time-stretch).
+- The loop seek produces a tiny (~50 ms) audible gap — fine for learning,
+  not designed for perfect-timing play.
 
 ## Achievements
 

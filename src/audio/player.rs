@@ -3,6 +3,7 @@ use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, buffer::SamplesBuff
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
+use std::time::Duration;
 
 pub struct AudioPlayer {
     _stream: OutputStream,
@@ -88,6 +89,22 @@ impl AudioPlayer {
 
     pub fn set_volume(&mut self, volume: f32) {
         self.sink.set_volume(volume);
+    }
+
+    /// Jump playback to a wall-clock position. A successful seek may produce
+    /// a small (~50ms) audible gap with `SamplesBuffer` — acceptable for
+    /// practice-mode looping. Failures are swallowed; the caller can retry.
+    pub fn seek_to_ms(&self, ms: u64) -> Result<()> {
+        self.sink
+            .try_seek(Duration::from_millis(ms))
+            .map_err(|e| anyhow::anyhow!("seek failed: {e}"))
+    }
+
+    /// Set playback speed. `1.0` is normal. Values < 1.0 slow down and drop
+    /// pitch; `rodio` does not time-stretch. Pitch change is acceptable for
+    /// practice mode.
+    pub fn set_speed(&self, speed: f32) {
+        self.sink.set_speed(speed);
     }
 
     /// Fire-and-forget SFX on a detached sink sharing the same output device.

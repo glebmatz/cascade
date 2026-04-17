@@ -12,6 +12,7 @@ use crate::game::effects::{Particle, Star};
 use crate::game::highway::Highway;
 use crate::game::hit_judge::{HitJudge, Judgement};
 use crate::game::modifiers::{Modifier, Mods};
+use crate::game::practice::PracticeConfig;
 use crate::game::state::GameState;
 use crate::ui::highway_render::HighwayWidget;
 use crate::ui::hud::{HudBottom, HudTop};
@@ -66,6 +67,14 @@ pub struct GameplayScreen {
     pub milestone: Option<MilestoneSplash>,
     pub last_milestone: u32,
     pub mods: Mods,
+    /// When set, the run is a practice loop: gameplay loops the section, score
+    /// and achievements are not recorded, and `mods` are expected to be empty.
+    pub practice: Option<PracticeConfig>,
+    /// Pre-computed badge shown in the top HUD while practising.
+    pub practice_label: Option<String>,
+    /// Audio speed multiplier. Always set (1.0 when not in practice) so every
+    /// caller goes through `position_ms_in_track` uniformly.
+    pub speed: f32,
 }
 
 pub struct MilestoneSplash {
@@ -87,6 +96,7 @@ impl GameplayScreen {
         health_enabled: bool,
         holds_enabled: bool,
         mods: Mods,
+        practice: Option<PracticeConfig>,
     ) -> Result<Self> {
         let mut audio = AudioPlayer::new()?;
         audio.load_samples(&samples, sample_rate)?;
@@ -100,6 +110,8 @@ impl GameplayScreen {
         }
 
         let hit_notes = vec![false; beatmap.notes.len()];
+        let speed = practice.as_ref().map(|p| p.speed).unwrap_or(1.0);
+        let practice_label = practice.as_ref().map(|p| p.badge());
 
         Ok(Self {
             highway: Highway::new(scroll_speed),
@@ -128,13 +140,35 @@ impl GameplayScreen {
             milestone: None,
             last_milestone: 0,
             mods,
+            practice,
+            practice_label,
+            speed,
             beatmap,
             audio,
         })
     }
 
     pub fn start(&mut self) {
+        // Apply practice speed/seek before we start playback so the first
+        // frame is already at the right position.
+        if let Some(p) = &self.practice {
+            self.audio.set_speed(p.speed);
+        }
         self.audio.play();
+        if let Some(p) = &self.practice {
+            let _ = self.audio.seek_to_ms(p.section_start_wallclock_ms());
+        }
+    }
+
+    pub fn is_practice(&self) -> bool {
+        self.practice.is_some()
+    }
+
+    /// Playback position mapped to track-time (beatmap-time) milliseconds.
+    /// `rodio`'s `sink.get_pos()` reports wall-clock elapsed time; when speed
+    /// differs from 1.0 we multiply to recover the track position.
+    fn position_ms_in_track(&self) -> u64 {
+        (self.audio.position_ms() as f64 * self.speed as f64) as u64
     }
 
     pub fn update(&mut self) {
@@ -143,7 +177,17 @@ impl GameplayScreen {
         }
 
         self.audio.update_position();
-        let current_ms = self.audio.position_ms();
+
+        // Practice loop: if we've played past the section end, seek back and
+        // reset game state so the run remains non-accumulative.
+        if let Some(end_ms) = self.practice.as_ref().map(|p| p.section_end_ms)
+            && self.position_ms_in_track() >= end_ms
+        {
+            self.reset_practice_loop();
+            return;
+        }
+
+        let current_ms = self.position_ms_in_track();
 
         self.highway.update(
             &self.beatmap.notes,
@@ -158,6 +202,30 @@ impl GameplayScreen {
         self.advance_particles();
         self.update_spectrum(current_ms);
         self.check_finish_conditions(current_ms);
+    }
+
+    fn reset_practice_loop(&mut self) {
+        let Some(p) = self.practice.as_ref() else {
+            return;
+        };
+        let wallclock = p.section_start_wallclock_ms();
+        let _ = self.audio.seek_to_ms(wallclock);
+
+        self.state = GameState::new();
+        for flag in &mut self.hit_notes {
+            *flag = false;
+        }
+        for slot in &mut self.held_notes {
+            *slot = None;
+        }
+        self.hit_flash = [0; 5];
+        self.lane_burst = [0; 5];
+        self.judgement_timer = 0;
+        self.judgement_elapsed = 0;
+        self.shake_frames = 0;
+        self.milestone = None;
+        self.last_milestone = 0;
+        self.particles.clear();
     }
 
     pub fn handle_action(&mut self, action: Action) -> Option<Action> {
@@ -212,6 +280,7 @@ impl GameplayScreen {
         HudTop {
             state: &self.state,
             health_enabled: self.health_enabled,
+            practice_label: self.practice_label.as_deref(),
         }
         .render(top_area, buf);
 
@@ -229,14 +298,21 @@ impl GameplayScreen {
             .with_energy(self.spectrum.energy)
             .with_beat_pulse(self.beat_pulse())
             .with_combo(self.state.combo)
-            .with_timing(self.audio.position_ms(), 2000.0 / self.scroll_speed)
+            .with_timing(self.position_ms_in_track(), 2000.0 / self.scroll_speed)
             .with_mods(self.mods.clone())
             .render(mid_area, buf);
 
         self.draw_milestone_splash(buf, area);
 
-        let progress = if self.beatmap.song.duration_ms > 0 {
-            self.audio.position_ms() as f64 / self.beatmap.song.duration_ms as f64
+        let progress = if let Some(p) = &self.practice {
+            // Progress through the practice section (0..1) — not the song.
+            let span = p.section_end_ms.saturating_sub(p.section_start_ms).max(1);
+            let within = self
+                .position_ms_in_track()
+                .saturating_sub(p.section_start_ms);
+            (within as f64 / span as f64).clamp(0.0, 1.0)
+        } else if self.beatmap.song.duration_ms > 0 {
+            self.position_ms_in_track() as f64 / self.beatmap.song.duration_ms as f64
         } else {
             0.0
         };
@@ -345,7 +421,7 @@ impl GameplayScreen {
 
     fn handle_key_press(&mut self, lane: usize) {
         self.hit_flash[lane] = HIT_FLASH_FRAMES;
-        let current_ms = self.audio.position_ms();
+        let current_ms = self.position_ms_in_track();
 
         let best = self.find_closest_note(lane, current_ms);
         let Some((note_idx, _)) = best else { return };
@@ -381,7 +457,7 @@ impl GameplayScreen {
         };
         let note = &self.beatmap.notes[idx];
         let note_end = note.time_ms + note.duration_ms;
-        let current_ms = self.audio.position_ms();
+        let current_ms = self.position_ms_in_track();
         if current_ms + HOLD_RELEASE_GRACE_MS < note_end {
             self.register_miss(idx);
         }
@@ -476,6 +552,10 @@ impl GameplayScreen {
     }
 
     fn check_finish_conditions(&mut self, current_ms: u64) {
+        if self.practice.is_some() {
+            // Practice never auto-finishes — the user exits via Esc + Q.
+            return;
+        }
         if self.audio.is_finished() || current_ms > self.beatmap.song.duration_ms + 2000 {
             self.finished = true;
         }
@@ -504,7 +584,7 @@ impl GameplayScreen {
     fn beat_pulse(&self) -> f32 {
         let bpm = self.beatmap.song.bpm.max(60) as f32;
         let beat_ms = 60_000.0 / bpm;
-        let phase = (self.audio.position_ms() as f32 % beat_ms) / beat_ms;
+        let phase = (self.position_ms_in_track() as f32 % beat_ms) / beat_ms;
         let env = (1.0 - phase).powf(4.0);
         (env * (0.5 + 0.5 * self.spectrum.energy)).clamp(0.0, 1.0)
     }
