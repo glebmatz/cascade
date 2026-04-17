@@ -15,9 +15,39 @@ pub struct SongEntry {
     pub slug: String,
     pub bpm: u32,
     pub duration_ms: u64,
+    /// Filesystem mtime in seconds since epoch — used for "Recently added" sort.
+    pub added_secs: u64,
     /// Note counts per Difficulty (Easy, Medium, Hard, Expert).
     pub note_counts: [u32; 4],
     pub present: [bool; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    Title,
+    Artist,
+    Added,
+    Bpm,
+}
+
+impl SortMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            SortMode::Title => "Title",
+            SortMode::Artist => "Artist",
+            SortMode::Added => "Recently added",
+            SortMode::Bpm => "BPM",
+        }
+    }
+
+    pub fn cycle(self) -> SortMode {
+        match self {
+            SortMode::Title => SortMode::Artist,
+            SortMode::Artist => SortMode::Added,
+            SortMode::Added => SortMode::Bpm,
+            SortMode::Bpm => SortMode::Title,
+        }
+    }
 }
 
 pub struct SongSelectScreen {
@@ -32,6 +62,16 @@ pub struct SongSelectScreen {
     /// Indices of songs matching the query (or all songs if no query).
     pub filtered_indices: Vec<usize>,
     pub scores: ScoreStore,
+    pub sort_mode: SortMode,
+    pub rename_mode: bool,
+    pub rename_buf: String,
+    pub rename_field: RenameField,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameField {
+    Title,
+    Artist,
 }
 
 impl SongSelectScreen {
@@ -47,6 +87,10 @@ impl SongSelectScreen {
             search_query: String::new(),
             filtered_indices: Vec::new(),
             scores: ScoreStore::default(),
+            sort_mode: SortMode::Title,
+            rename_mode: false,
+            rename_buf: String::new(),
+            rename_field: RenameField::Title,
         }
     }
 
@@ -137,6 +181,13 @@ impl SongSelectScreen {
                 .to_string_lossy()
                 .to_string();
 
+            let added_secs = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
             self.songs.push(SongEntry {
                 title,
                 artist,
@@ -144,12 +195,32 @@ impl SongSelectScreen {
                 slug,
                 bpm,
                 duration_ms,
+                added_secs,
                 note_counts,
                 present,
             });
         }
 
-        self.songs.sort_by_key(|a| a.title.to_lowercase());
+        self.apply_sort();
+        self.rebuild_filter();
+    }
+
+    fn apply_sort(&mut self) {
+        match self.sort_mode {
+            SortMode::Title => self.songs.sort_by_key(|a| a.title.to_lowercase()),
+            SortMode::Artist => self.songs.sort_by(|a, b| {
+                let ka = (a.artist.to_lowercase(), a.title.to_lowercase());
+                let kb = (b.artist.to_lowercase(), b.title.to_lowercase());
+                ka.cmp(&kb)
+            }),
+            SortMode::Added => self.songs.sort_by_key(|a| std::cmp::Reverse(a.added_secs)),
+            SortMode::Bpm => self.songs.sort_by_key(|a| a.bpm),
+        }
+    }
+
+    pub fn cycle_sort(&mut self) {
+        self.sort_mode = self.sort_mode.cycle();
+        self.apply_sort();
         self.rebuild_filter();
     }
 
@@ -229,7 +300,7 @@ impl SongSelectScreen {
     }
 
     pub fn handle_action(&mut self, action: Action) -> Option<Action> {
-        if self.import_mode || self.search_mode {
+        if self.import_mode || self.search_mode || self.rename_mode {
             return None;
         }
         match action {
@@ -256,6 +327,14 @@ impl SongSelectScreen {
                 self.cycle_difficulty();
                 None
             }
+            Action::Sort => {
+                self.cycle_sort();
+                None
+            }
+            Action::Rename => {
+                self.start_rename();
+                None
+            }
             Action::Delete => {
                 if let Some(idx) = self.real_index() {
                     let song = &self.songs[idx];
@@ -269,6 +348,76 @@ impl SongSelectScreen {
             Action::Back | Action::Pause => Some(Action::Navigate(Screen::Menu)),
             _ => None,
         }
+    }
+
+    fn start_rename(&mut self) {
+        let Some(idx) = self.real_index() else { return };
+        let song = &self.songs[idx];
+        self.rename_field = RenameField::Title;
+        self.rename_buf = song.title.clone();
+        self.rename_mode = true;
+    }
+
+    pub fn handle_rename_key(&mut self, code: KeyCode) -> bool {
+        if !self.rename_mode {
+            return false;
+        }
+        match code {
+            KeyCode::Char(c) => {
+                self.rename_buf.push(c);
+                true
+            }
+            KeyCode::Backspace => {
+                self.rename_buf.pop();
+                true
+            }
+            KeyCode::Tab => {
+                self.commit_rename_field();
+                self.rename_field = match self.rename_field {
+                    RenameField::Title => RenameField::Artist,
+                    RenameField::Artist => RenameField::Title,
+                };
+                self.rename_buf = self
+                    .real_index()
+                    .and_then(|i| self.songs.get(i))
+                    .map(|s| match self.rename_field {
+                        RenameField::Title => s.title.clone(),
+                        RenameField::Artist => s.artist.clone(),
+                    })
+                    .unwrap_or_default();
+                true
+            }
+            KeyCode::Enter => {
+                self.commit_rename_field();
+                self.persist_rename();
+                self.rename_mode = false;
+                true
+            }
+            KeyCode::Esc => {
+                self.rename_mode = false;
+                self.rename_buf.clear();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn commit_rename_field(&mut self) {
+        let Some(idx) = self.real_index() else { return };
+        let song = &mut self.songs[idx];
+        match self.rename_field {
+            RenameField::Title => song.title = self.rename_buf.clone(),
+            RenameField::Artist => song.artist = self.rename_buf.clone(),
+        }
+    }
+
+    fn persist_rename(&mut self) {
+        let Some(idx) = self.real_index() else { return };
+        let song = &self.songs[idx];
+        let _ = crate::audio::import::rename_song(&song.dir, &song.title, &song.artist);
+        self.import_status = Some(format!("Renamed: {} — {}", song.artist, song.title));
+        self.apply_sort();
+        self.rebuild_filter();
     }
 
     pub fn cycle_difficulty(&mut self) {
@@ -303,12 +452,20 @@ impl SongSelectScreen {
             &[("Enter", "import"), ("Esc", "cancel")]
         } else if self.search_mode {
             &[("Enter", "confirm"), ("Esc", "clear")]
+        } else if self.rename_mode {
+            &[
+                ("Tab", "title↔artist"),
+                ("Enter", "save"),
+                ("Esc", "cancel"),
+            ]
         } else {
             &[
                 ("↵", "play"),
                 ("Tab", "difficulty"),
+                ("s", "sort"),
                 ("/", "search"),
                 ("i", "import"),
+                ("r", "rename"),
                 ("x", "delete"),
                 ("Esc", "back"),
             ]
@@ -356,6 +513,16 @@ impl SongSelectScreen {
             );
         }
 
+        // Sort indicator
+        let sort_txt = format!("Sort: {}", self.sort_mode.label());
+        let sw = sort_txt.chars().count() as u16;
+        buf.set_string(
+            area.x + area.width.saturating_sub(sw + 2),
+            area.y + 3,
+            &sort_txt,
+            Style::default().fg(Color::Rgb(110, 110, 110)),
+        );
+
         if self.import_mode {
             let prompt = format!("Path to audio file: {}_", self.import_input);
             let x = area.x + 4;
@@ -393,6 +560,107 @@ impl SongSelectScreen {
                 Style::default().fg(Color::Rgb(120, 120, 120)),
             );
         }
+
+        if self.rename_mode {
+            self.render_rename_overlay(buf, area);
+        }
+    }
+
+    fn render_rename_overlay(&self, buf: &mut Buffer, area: Rect) {
+        let cx = area.x + area.width / 2;
+        let cy = area.y + area.height / 2;
+        let w: u16 = 60;
+        let h: u16 = 7;
+        let x = cx.saturating_sub(w / 2);
+        let y = cy.saturating_sub(h / 2);
+
+        for dy in 0..h {
+            for dx in 0..w {
+                buf.set_string(
+                    x + dx,
+                    y + dy,
+                    " ",
+                    Style::default().bg(Color::Rgb(20, 20, 28)),
+                );
+            }
+        }
+        for dx in 0..w {
+            buf.set_string(
+                x + dx,
+                y,
+                "─",
+                Style::default()
+                    .fg(Color::Rgb(80, 80, 100))
+                    .bg(Color::Rgb(20, 20, 28)),
+            );
+            buf.set_string(
+                x + dx,
+                y + h - 1,
+                "─",
+                Style::default()
+                    .fg(Color::Rgb(80, 80, 100))
+                    .bg(Color::Rgb(20, 20, 28)),
+            );
+        }
+
+        let title_focused = matches!(self.rename_field, RenameField::Title);
+        let song = self.real_index().and_then(|i| self.songs.get(i));
+        let (cur_title, cur_artist) = song
+            .map(|s| (s.title.clone(), s.artist.clone()))
+            .unwrap_or_default();
+
+        let header = "RENAME SONG";
+        buf.set_string(
+            cx - header.len() as u16 / 2,
+            y + 1,
+            header,
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Rgb(20, 20, 28))
+                .bold(),
+        );
+
+        let title_value = if title_focused {
+            format!("{}_", self.rename_buf)
+        } else {
+            cur_title
+        };
+        let artist_value = if !title_focused {
+            format!("{}_", self.rename_buf)
+        } else {
+            cur_artist
+        };
+
+        let label = |buf: &mut Buffer, focused: bool, label: &str, value: &str, row: u16| {
+            let label_color = if focused {
+                Color::Rgb(255, 240, 150)
+            } else {
+                Color::Rgb(120, 120, 120)
+            };
+            let value_color = if focused {
+                Color::White
+            } else {
+                Color::Rgb(160, 160, 160)
+            };
+            buf.set_string(
+                x + 2,
+                row,
+                label,
+                Style::default()
+                    .fg(label_color)
+                    .bg(Color::Rgb(20, 20, 28))
+                    .bold(),
+            );
+            buf.set_string(
+                x + 12,
+                row,
+                value,
+                Style::default().fg(value_color).bg(Color::Rgb(20, 20, 28)),
+            );
+        };
+
+        label(buf, title_focused, "Title:", &title_value, y + 3);
+        label(buf, !title_focused, "Artist:", &artist_value, y + 4);
     }
 
     fn render_song_list(&self, buf: &mut Buffer, area: Rect) {

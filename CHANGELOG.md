@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-04-17
+
+### Added
+
+- **ID3 / Vorbis tag parsing on import** — title and artist are now read
+  from the audio file's embedded metadata (works for MP3, FLAC, OGG, M4A,
+  Opus, WebM via `symphonia`). Falls back to filename if no tags are present.
+- **In-game rename**: press `r` on a song in the song-select screen to edit
+  its title and artist. `Tab` switches between fields, `Enter` saves.
+- **Sort modes**: press `s` in song-select to cycle through `Title`,
+  `Artist`, `Recently added`, and `BPM`.
+- **`cascade rename <slug> [--title NAME] [--artist NAME]`** CLI command.
+- **Smart `cascade regen`**: when an existing song's metadata looks like a
+  default (title equals the filename stem and artist is empty), regen now
+  re-reads embedded tags and back-fills the metadata file. Manual renames
+  are preserved.
+
+### Fixed
+
+- **Release workflow**: Homebrew tap update no longer fails when the tap
+  repo doesn't yet contain a `Formula/` directory.
+- **Release workflow**: dropped the unreliable `aarch64-unknown-linux-gnu`
+  prebuilt target. ARM Linux users can install via `cargo install
+  cascade-rhythm`.
+- **CI**: pinned Rust toolchain to 1.95.0 via `rust-toolchain.toml` so new
+  clippy lints don't break builds unexpectedly.
+
 ## [0.1.0] — 2026-04-17
 
 First public release.
@@ -56,5 +83,6 @@ First public release.
   `cascade regen`, `cascade help`.
 - **Dual MIT / Apache-2.0 licensing**.
 
-[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/glebmatz/cascade/releases/tag/v0.2.0
 [0.1.0]: https://github.com/glebmatz/cascade/releases/tag/v0.1.0

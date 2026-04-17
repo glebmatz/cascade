@@ -24,6 +24,8 @@ pub enum Action {
     Tab,
     Import,
     Delete,
+    Rename,
+    Sort,
 }
 
 pub struct App {

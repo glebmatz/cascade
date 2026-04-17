@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-use crate::audio::{analyzer, import};
+use crate::audio::{analyzer, import, metadata};
 use crate::beatmap::types::{Beatmap, Difficulty, SongMeta};
 use crate::beatmap::{generator, loader};
 use crate::config::Config;
@@ -16,6 +16,12 @@ pub fn parse_difficulty_flag(args: &[String]) -> Option<Difficulty> {
         "--expert" | "-x" => Some(Difficulty::Expert),
         _ => None,
     })
+}
+
+/// Pull `--flag value` out of an argv slice (any position).
+pub fn extract_flag(args: &[String], flag: &str) -> Option<String> {
+    let pos = args.iter().position(|a| a == flag)?;
+    args.get(pos + 1).cloned()
 }
 
 pub fn song_slug_from_path(p: &Option<PathBuf>) -> String {
@@ -36,6 +42,8 @@ pub fn print_help() -> Result<()> {
          cascade play <slug> [--diff]    Launch straight into gameplay\n                                  \
          --easy / --medium / --hard / --expert\n  \
          cascade regen                   Regenerate beatmaps for every imported song\n  \
+         cascade rename <slug> [--title NAME] [--artist NAME]\n                                  \
+         Edit a song's title or artist\n  \
          cascade help                    Show this help"
     );
     Ok(())
@@ -49,10 +57,34 @@ pub fn add(path_str: &str) -> Result<()> {
     println!("Importing {}...", file_path.display());
     let song = import::import_local_file(&file_path, &songs_dir)?;
 
-    println!("Generating beatmaps for {}...", song.title);
-    regenerate_for_dir(&song.dir, &song.audio_path, &song.title)?;
+    let display = if song.artist.is_empty() {
+        song.title.clone()
+    } else {
+        format!("{} — {}", song.artist, song.title)
+    };
+    println!("Generating beatmaps for {}...", display);
+    regenerate_for_dir(&song.dir, &song.audio_path, &song.title, &song.artist)?;
 
-    println!("Successfully imported: {}", song.title);
+    println!("Successfully imported: {}", display);
+    Ok(())
+}
+
+pub fn rename(slug: &str, new_title: Option<&str>, new_artist: Option<&str>) -> Result<()> {
+    let dir = Config::cascade_dir().join("songs").join(slug);
+    if !dir.exists() {
+        anyhow::bail!("Song '{}' not found.", slug);
+    }
+    let meta_path = dir.join("metadata.json");
+    let raw = std::fs::read_to_string(&meta_path)?;
+    let v: serde_json::Value = serde_json::from_str(&raw)?;
+    let title = new_title
+        .map(String::from)
+        .unwrap_or_else(|| v["title"].as_str().unwrap_or("").to_string());
+    let artist = new_artist
+        .map(String::from)
+        .unwrap_or_else(|| v["artist"].as_str().unwrap_or("").to_string());
+    import::rename_song(&dir, &title, &artist)?;
+    println!("Renamed: {} — {}", artist, title);
     Ok(())
 }
 
@@ -132,9 +164,41 @@ pub fn regen() -> Result<()> {
             continue;
         };
 
-        let title = read_title(&path).unwrap_or_else(|| slug.clone());
-        println!("Regenerating {}...", title);
-        regenerate_for_dir(&path, &audio_path, &title)?;
+        let (mut title, mut artist) =
+            read_title_artist(&path).unwrap_or((slug.clone(), String::new()));
+
+        // If metadata looks untouched (default title from filename + empty artist),
+        // try to backfill from the audio file's embedded tags.
+        let audio_stem = audio_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let looks_default = artist.is_empty() && (title == audio_stem || title == slug);
+        if looks_default {
+            let tags = metadata::read(&audio_path);
+            if let Some(t) = tags.title.filter(|t| !t.is_empty()) {
+                title = t;
+            }
+            if let Some(a) = tags.artist.filter(|a| !a.is_empty()) {
+                artist = a;
+            }
+            if title != audio_stem || !artist.is_empty() {
+                let audio_filename = audio_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                let _ = import::write_metadata_file(&path, &title, &artist, &audio_filename);
+            }
+        }
+
+        let display = if artist.is_empty() {
+            title.clone()
+        } else {
+            format!("{} — {}", artist, title)
+        };
+        println!("Regenerating {}...", display);
+        regenerate_for_dir(&path, &audio_path, &title, &artist)?;
     }
     println!("Done.");
     Ok(())
@@ -182,10 +246,6 @@ fn read_title_artist(dir: &Path) -> Option<(String, String)> {
     ))
 }
 
-fn read_title(dir: &Path) -> Option<String> {
-    read_title_artist(dir).map(|(t, _)| t)
-}
-
 fn read_bpm_duration(dir: &Path) -> (u32, u64) {
     for d in Difficulty::all() {
         let p = dir.join(d.filename());
@@ -219,7 +279,7 @@ fn format_best_scores(scores: &ScoreStore, slug: &str) -> String {
     out
 }
 
-fn regenerate_for_dir(dir: &Path, audio_path: &Path, title: &str) -> Result<()> {
+fn regenerate_for_dir(dir: &Path, audio_path: &Path, title: &str, artist: &str) -> Result<()> {
     let (samples, sample_rate) = analyzer::decode_audio(audio_path)?;
     let duration_ms = (samples.len() as f64 / sample_rate as f64 * 1000.0) as u64;
     let audio_filename = audio_path
@@ -230,7 +290,7 @@ fn regenerate_for_dir(dir: &Path, audio_path: &Path, title: &str) -> Result<()> 
 
     let meta = SongMeta {
         title: title.to_string(),
-        artist: String::new(),
+        artist: artist.to_string(),
         audio_file: audio_filename,
         bpm: 120,
         duration_ms,

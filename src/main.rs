@@ -51,6 +51,16 @@ fn main() -> Result<()> {
             "add" if args.len() >= 3 => return cli::add(&args[2]),
             "list" | "ls" => return cli::list(),
             "regen" => return cli::regen(),
+            "rename" if args.len() >= 3 => {
+                let slug = &args[2];
+                let title = cli::extract_flag(&args[3..], "--title");
+                let artist = cli::extract_flag(&args[3..], "--artist");
+                if title.is_none() && artist.is_none() {
+                    eprintln!("Usage: cascade rename <slug> [--title NAME] [--artist NAME]");
+                    return Ok(());
+                }
+                return cli::rename(slug, title.as_deref(), artist.as_deref());
+            }
             "play" if args.len() >= 3 => {
                 let slug = args[2].clone();
                 let difficulty = cli::parse_difficulty_flag(&args[3..]);
@@ -332,8 +342,15 @@ fn process_input(
             continue;
         }
         if session.app.screen == Screen::SongSelect
+            && session.song_select.rename_mode
+            && session.song_select.handle_rename_key(key.code)
+        {
+            continue;
+        }
+        if session.app.screen == Screen::SongSelect
             && !session.song_select.import_mode
             && !session.song_select.search_mode
+            && !session.song_select.rename_mode
             && key.code == KeyCode::Char('/')
         {
             session.song_select.search_mode = true;
@@ -549,7 +566,7 @@ fn run_import(
                 .to_string();
             let meta = beatmap::types::SongMeta {
                 title: song.title.clone(),
-                artist: String::new(),
+                artist: song.artist.clone(),
                 audio_file: audio_filename,
                 bpm: 120,
                 duration_ms,

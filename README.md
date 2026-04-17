@@ -31,7 +31,7 @@ hold-note release detection.
 
 ## Features
 
-- **Works with your library** — import any audio file, no curated song pack required
+- **Works with your library** — import any audio file, no curated song pack required; ID3/Vorbis tags are read automatically
 - **Smart beatmaps** — spectral-flux onset detection, autocorrelated BPM, downbeat phase alignment, per-difficulty density
 - **Chords + holds** — up to 3-note chords and sustained holds, tuned per difficulty
 - **Rich visuals** — half-block rendering, particle physics, starfield background, vignette, live spectrum bars, beat-synced receptor glow
@@ -82,14 +82,18 @@ cargo build --release
 ## Quick start
 
 ```sh
-# 1. Import a song. Beatmaps for all 4 difficulties are generated.
+# 1. Import a song. ID3 tags are read automatically; beatmaps for all
+#    4 difficulties are generated.
 cascade add ~/Music/my-favorite-song.mp3
 
-# 2. Check what's imported.
+# 2. Check what's imported (with best scores per difficulty).
 cascade list
 
 # 3. Launch straight into gameplay.
 cascade play my-favorite-song --hard
+
+# Fix a typo in tags later:
+cascade rename my-favorite-song --title "Numb" --artist "Linkin Park"
 
 # …or just run `cascade` for the full interactive UI.
 cascade
@@ -127,7 +131,9 @@ once, and every hit after that will feel honest.
 | <kbd>Enter</kbd> | Confirm |
 | <kbd>Esc</kbd> | Back |
 | <kbd>Tab</kbd> | Cycle difficulty (song select) |
+| <kbd>s</kbd> | Cycle sort: Title / Artist / Recently added / BPM (song select) |
 | <kbd>/</kbd> | Search (song select) |
+| <kbd>r</kbd> | Rename selected song (song select) |
 | <kbd>i</kbd> | Import audio file (song select) |
 | <kbd>x</kbd> | Delete song (song select) |
 
