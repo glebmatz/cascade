@@ -149,8 +149,7 @@ impl SongSelectScreen {
             });
         }
 
-        self.songs
-            .sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        self.songs.sort_by_key(|a| a.title.to_lowercase());
         self.rebuild_filter();
     }
 

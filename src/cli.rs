@@ -67,7 +67,7 @@ pub fn list() -> Result<()> {
     }
 
     let mut entries = collect_song_summaries(&songs_dir)?;
-    entries.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    entries.sort_by_key(|a| a.title.to_lowercase());
 
     if entries.is_empty() {
         println!("No songs imported yet.");
