@@ -17,6 +17,26 @@
 
 </div>
 
+<p align="center">
+  <a href="https://github.com/glebmatz/cascade">
+    <img src="docs/cascade-demo.gif" alt="Cascade gameplay demo" width="820">
+  </a>
+  <br>
+  <sub><i>Drop in any audio file — Cascade analyses it, generates a beatmap, and you start playing.</i></sub>
+</p>
+
+<p align="center">
+  <a href="#install"><strong>↓ Install</strong></a>
+  &nbsp;·&nbsp;
+  <a href="#quick-start">Quick start</a>
+  &nbsp;·&nbsp;
+  <a href="#controls">Controls</a>
+  &nbsp;·&nbsp;
+  <a href="#how-the-beatmap-generator-works">How it works</a>
+  &nbsp;·&nbsp;
+  <a href="#contributing">Contribute</a>
+</p>
+
 ---
 
 Cascade is a five-lane rhythm game that runs entirely in your terminal. Drop
