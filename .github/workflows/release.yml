@@ -34,10 +34,6 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive-suffix: .tar.gz
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            archive-suffix: .tar.gz
-            cross: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive-suffix: .zip
@@ -48,26 +44,6 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
 
-      - name: Install cross-compile deps (aarch64 linux)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          # Restrict default amd64 mirrors to amd64 only (Ubuntu 24.04 deb822 format).
-          sudo sed -i '/^URIs: http:\/\/azure.archive.ubuntu.com/a Architectures: amd64' \
-            /etc/apt/sources.list.d/ubuntu.sources
-          sudo sed -i '/^URIs: http:\/\/archive.ubuntu.com/a Architectures: amd64' \
-            /etc/apt/sources.list.d/ubuntu.sources || true
-          sudo sed -i '/^URIs: http:\/\/security.ubuntu.com/a Architectures: amd64' \
-            /etc/apt/sources.list.d/ubuntu.sources || true
-          sudo dpkg --add-architecture arm64
-          # arm64 packages live on ports.ubuntu.com, not the default mirrors.
-          sudo tee /etc/apt/sources.list.d/arm64-ports.list > /dev/null <<'EOF'
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
-          EOF
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu libasound2-dev:arm64
-
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
@@ -75,13 +51,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
-
-      - name: Configure cross linker (aarch64 linux)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -124,7 +93,6 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       sha256_darwin_arm64: ${{ steps.hashes.outputs.sha256_darwin_arm64 }}
       sha256_darwin_x64:   ${{ steps.hashes.outputs.sha256_darwin_x64 }}
-      sha256_linux_arm64:  ${{ steps.hashes.outputs.sha256_linux_arm64 }}
       sha256_linux_x64:    ${{ steps.hashes.outputs.sha256_linux_x64 }}
     steps:
       - uses: actions/checkout@v4
@@ -155,8 +123,6 @@ jobs:
           echo "sha256_darwin_arm64=$(cut -d' ' -f1 < $f)" >> $GITHUB_OUTPUT
           f=release/cascade-x86_64-apple-darwin.tar.gz.sha256
           echo "sha256_darwin_x64=$(cut -d' ' -f1 < $f)" >> $GITHUB_OUTPUT
-          f=release/cascade-aarch64-unknown-linux-gnu.tar.gz.sha256
-          echo "sha256_linux_arm64=$(cut -d' ' -f1 < $f)" >> $GITHUB_OUTPUT
           f=release/cascade-x86_64-unknown-linux-gnu.tar.gz.sha256
           echo "sha256_linux_x64=$(cut -d' ' -f1 < $f)" >> $GITHUB_OUTPUT
 
@@ -185,7 +151,6 @@ jobs:
           VERSION: ${{ needs.release.outputs.version }}
           SHA_DARWIN_ARM64: ${{ needs.release.outputs.sha256_darwin_arm64 }}
           SHA_DARWIN_X64:   ${{ needs.release.outputs.sha256_darwin_x64 }}
-          SHA_LINUX_ARM64:  ${{ needs.release.outputs.sha256_linux_arm64 }}
           SHA_LINUX_X64:    ${{ needs.release.outputs.sha256_linux_x64 }}
         run: |
           cat > tap/Formula/cascade.rb <<EOF
@@ -206,13 +171,8 @@ jobs:
             end
 
             on_linux do
-              if Hardware::CPU.arm?
-                url "https://github.com/glebmatz/cascade/releases/download/v${VERSION}/cascade-aarch64-unknown-linux-gnu.tar.gz"
-                sha256 "${SHA_LINUX_ARM64}"
-              else
-                url "https://github.com/glebmatz/cascade/releases/download/v${VERSION}/cascade-x86_64-unknown-linux-gnu.tar.gz"
-                sha256 "${SHA_LINUX_X64}"
-              end
+              url "https://github.com/glebmatz/cascade/releases/download/v${VERSION}/cascade-x86_64-unknown-linux-gnu.tar.gz"
+              sha256 "${SHA_LINUX_X64}"
             end
 
             def install

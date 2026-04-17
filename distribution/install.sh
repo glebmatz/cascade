@@ -35,8 +35,8 @@ detect_target() {
             ;;
         linux)
             case "$arch" in
-                arm64|aarch64) echo "aarch64-unknown-linux-gnu" ;;
                 x86_64|amd64)  echo "x86_64-unknown-linux-gnu" ;;
+                arm64|aarch64) die "ARM Linux is not supported by prebuilt binaries yet. Install with: cargo install cascade-rhythm" ;;
                 *) die "unsupported Linux architecture: $arch" ;;
             esac
             ;;
