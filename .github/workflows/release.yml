@@ -98,7 +98,7 @@ jobs:
           Compress-Archive -Path "$stage" -DestinationPath "dist/$stage.zip"
           (Get-FileHash "dist/$stage.zip" -Algorithm SHA256).Hash | Out-File "dist/$stage.zip.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cascade-${{ matrix.target }}
           path: dist/*
