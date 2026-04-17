@@ -1,6 +1,6 @@
 [package]
 name = "cascade-rhythm"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "Terminal rhythm game with automatic beatmap generation from any audio file"
 repository = "https://github.com/glebmatz/cascade"

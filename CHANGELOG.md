@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-04-17
+
+### Fixed
+
+- Formatting pass with `cargo fmt` so the CI format check is green.
+
 ## [0.4.0] — 2026-04-17
 
 ### Added
@@ -132,7 +138,8 @@ First public release.
   `cascade regen`, `cascade help`.
 - **Dual MIT / Apache-2.0 licensing**.
 
-[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/glebmatz/cascade/releases/tag/v0.4.1
 [0.4.0]: https://github.com/glebmatz/cascade/releases/tag/v0.4.0
 [0.3.0]: https://github.com/glebmatz/cascade/releases/tag/v0.3.0
 [0.2.0]: https://github.com/glebmatz/cascade/releases/tag/v0.2.0
