@@ -1,2 +1,14 @@
 target/
+dist/
 .superpowers/
+
+# IDEs / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Local secrets
+.env
+.env.local

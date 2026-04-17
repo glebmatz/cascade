@@ -12,6 +12,12 @@ pub struct GameState {
     pub health: f64,
 }
 
+impl Default for GameState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GameState {
     pub fn new() -> Self {
         Self {
@@ -36,7 +42,6 @@ impl GameState {
         self.max_possible_points += Judgement::max_points();
         self.last_judgement = Some(judgement);
 
-        // Update health based on judgement
         let health_delta = match judgement {
             Judgement::Perfect => 0.02,
             Judgement::Great => 0.01,
@@ -76,10 +81,16 @@ impl GameState {
 
     pub fn grade(&self) -> &'static str {
         let acc = self.accuracy();
-        if acc >= 95.0 { "S" }
-        else if acc >= 90.0 { "A" }
-        else if acc >= 80.0 { "B" }
-        else if acc >= 70.0 { "C" }
-        else { "D" }
+        if acc >= 95.0 {
+            "S"
+        } else if acc >= 90.0 {
+            "A"
+        } else if acc >= 80.0 {
+            "B"
+        } else if acc >= 70.0 {
+            "C"
+        } else {
+            "D"
+        }
     }
 }

@@ -26,6 +26,12 @@ pub struct SpectrumAnalyzer {
     decay: f32,
 }
 
+impl Default for SpectrumAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SpectrumAnalyzer {
     pub fn new() -> Self {
         let planner = FftPlanner::new();
@@ -39,9 +45,11 @@ impl SpectrumAnalyzer {
 
         for i in 0..NUM_BANDS {
             let low = ((log_min + (log_max - log_min) * i as f32 / NUM_BANDS as f32).exp()
-                / 44100.0 * ANALYZER_FFT_SIZE as f32) as usize;
+                / 44100.0
+                * ANALYZER_FFT_SIZE as f32) as usize;
             let high = ((log_min + (log_max - log_min) * (i + 1) as f32 / NUM_BANDS as f32).exp()
-                / 44100.0 * ANALYZER_FFT_SIZE as f32) as usize;
+                / 44100.0
+                * ANALYZER_FFT_SIZE as f32) as usize;
             band_ranges.push((low.max(1), high.max(low + 1).min(ANALYZER_FFT_SIZE / 2)));
         }
 
@@ -54,6 +62,7 @@ impl SpectrumAnalyzer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn shared_spectrum(&self) -> Arc<Mutex<SpectrumData>> {
         Arc::clone(&self.spectrum)
     }
@@ -64,8 +73,13 @@ impl SpectrumAnalyzer {
         let start = samples.len().saturating_sub(ANALYZER_FFT_SIZE);
         for (i, val) in self.buffer.iter_mut().enumerate() {
             let sample_idx = start + i;
-            let s = if sample_idx < samples.len() { samples[sample_idx] } else { 0.0 };
-            let window = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / ANALYZER_FFT_SIZE as f32).cos());
+            let s = if sample_idx < samples.len() {
+                samples[sample_idx]
+            } else {
+                0.0
+            };
+            let window = 0.5
+                * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / ANALYZER_FFT_SIZE as f32).cos());
             *val = Complex::new(s * window, 0.0);
         }
 
@@ -115,16 +129,20 @@ pub fn decode_audio(path: &std::path::Path) -> anyhow::Result<(Vec<f32>, u32)> {
         hint.with_extension(ext);
     }
 
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())?;
+    let probed = symphonia::default::get_probe().format(
+        &hint,
+        mss,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    )?;
 
     let mut format = probed.format;
     let track = format.default_track().unwrap();
     let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
     let track_id = track.id;
 
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())?;
+    let mut decoder =
+        symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
 
     let mut all_samples = Vec::new();
 

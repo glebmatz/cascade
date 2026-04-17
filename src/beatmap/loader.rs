@@ -1,6 +1,6 @@
+use super::types::Beatmap;
 use anyhow::Result;
 use std::path::Path;
-use super::types::Beatmap;
 
 pub fn load(path: &Path) -> Result<Beatmap> {
     let content = std::fs::read_to_string(path)?;

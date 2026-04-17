@@ -5,6 +5,7 @@ pub enum Screen {
     Gameplay,
     Results,
     Settings,
+    Calibrate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,7 +17,9 @@ pub enum Action {
     MenuDown,
     MenuSelect,
     GameKey(usize),
+    GameKeyRelease(usize),
     Pause,
+    #[allow(dead_code)]
     Back,
     Tab,
     Import,
@@ -26,6 +29,12 @@ pub enum Action {
 pub struct App {
     pub screen: Screen,
     pub running: bool,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl App {
