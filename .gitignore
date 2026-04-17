@@ -1,6 +1,7 @@
 target/
 dist/
 .superpowers/
+docs/superpowers/
 
 # IDEs / editors
 .idea/
