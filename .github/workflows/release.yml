@@ -42,7 +42,7 @@ jobs:
             os: windows-latest
             archive-suffix: .zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install ALSA dev (Linux)
         if: runner.os == 'Linux'
@@ -116,7 +116,7 @@ jobs:
       sha256_linux_arm64:  ${{ steps.hashes.outputs.sha256_linux_arm64 }}
       sha256_linux_x64:    ${{ steps.hashes.outputs.sha256_linux_x64 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Extract version from tag
         id: meta
@@ -163,7 +163,7 @@ jobs:
     if: ${{ !contains(needs.release.outputs.version, '-') }}
     steps:
       - name: Check out tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: glebmatz/homebrew-cascade
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -231,7 +231,7 @@ jobs:
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo publish --token "${CARGO_REGISTRY_TOKEN}"
