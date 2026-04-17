@@ -51,9 +51,20 @@ jobs:
       - name: Install cross-compile deps (aarch64 linux)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
+          # Restrict default amd64 mirrors to amd64 only (Ubuntu 24.04 deb822 format).
+          sudo sed -i '/^URIs: http:\/\/azure.archive.ubuntu.com/a Architectures: amd64' \
+            /etc/apt/sources.list.d/ubuntu.sources
+          sudo sed -i '/^URIs: http:\/\/archive.ubuntu.com/a Architectures: amd64' \
+            /etc/apt/sources.list.d/ubuntu.sources || true
+          sudo sed -i '/^URIs: http:\/\/security.ubuntu.com/a Architectures: amd64' \
+            /etc/apt/sources.list.d/ubuntu.sources || true
           sudo dpkg --add-architecture arm64
-          # Point apt at arm64 sources only for arm64 packages to avoid
-          # breaking amd64 resolution.
+          # arm64 packages live on ports.ubuntu.com, not the default mirrors.
+          sudo tee /etc/apt/sources.list.d/arm64-ports.list > /dev/null <<'EOF'
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
+          EOF
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu libasound2-dev:arm64
 
