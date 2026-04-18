@@ -6,6 +6,7 @@ pub enum Screen {
     Results,
     Settings,
     Calibrate,
+    Stats,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -167,7 +167,7 @@ impl GameplayScreen {
     /// Playback position mapped to track-time (beatmap-time) milliseconds.
     /// `rodio`'s `sink.get_pos()` reports wall-clock elapsed time; when speed
     /// differs from 1.0 we multiply to recover the track position.
-    fn position_ms_in_track(&self) -> u64 {
+    pub fn position_ms_in_track(&self) -> u64 {
         (self.audio.position_ms() as f64 * self.speed as f64) as u64
     }
 

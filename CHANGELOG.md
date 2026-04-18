@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-04-18
+
+### Added
+
+- **Stats dashboard** — a new `Stats` entry in the main menu and a matching
+  `cascade stats` CLI command. Shows total plays, total time played, total
+  notes hit, top-5 most-played songs, per-difficulty breakdown (plays / best
+  accuracy / best score / average accuracy), a 30-day accuracy sparkline,
+  a 30-day activity heatmap, and achievement unlock progress.
+- **Play history** persistence. Every non-practice run is appended to
+  `~/.cascade/play_history.json` with score, accuracy, combo, judgement
+  counts, duration played, and a `died` flag. Practice runs are still
+  excluded — they don't count for scores, achievements, or stats.
+
+### Fixed
+
+- **Main menu centering** — menu items now share a single left edge defined
+  by the widest item, so longer entries (like `Settings`) no longer push
+  shorter ones off-center.
+
 ## [0.4.1] — 2026-04-17
 
 ### Fixed
@@ -138,7 +158,8 @@ First public release.
   `cascade regen`, `cascade help`.
 - **Dual MIT / Apache-2.0 licensing**.
 
-[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/glebmatz/cascade/releases/tag/v0.5.0
 [0.4.1]: https://github.com/glebmatz/cascade/releases/tag/v0.4.1
 [0.4.0]: https://github.com/glebmatz/cascade/releases/tag/v0.4.0
 [0.3.0]: https://github.com/glebmatz/cascade/releases/tag/v0.3.0

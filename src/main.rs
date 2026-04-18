@@ -10,8 +10,10 @@ mod cli;
 mod config;
 mod game;
 mod input;
+mod play_history;
 mod score_store;
 mod screens;
+mod stats;
 mod ui;
 
 use std::io;
@@ -34,6 +36,7 @@ use app::{Action, App, Screen};
 use audio::sfx::{self, SfxPlayer};
 use beatmap::types::Difficulty;
 use config::Config;
+use play_history::{PlayHistory, PlayRecord};
 use score_store::{BestScore, ScoreStore};
 use screens::calibrate::CalibrateScreen;
 use screens::gameplay::GameplayScreen;
@@ -41,6 +44,7 @@ use screens::menu::MenuScreen;
 use screens::results::ResultsScreen;
 use screens::settings::SettingsScreen;
 use screens::song_select::SongSelectScreen;
+use screens::stats::StatsScreen;
 
 const TARGET_FPS: u64 = 60;
 const FRAME_DURATION: Duration = Duration::from_micros(1_000_000 / TARGET_FPS);
@@ -54,6 +58,7 @@ fn main() -> Result<()> {
             "list" | "ls" => return cli::list(),
             "song" if args.len() >= 3 => return cli::song(&args[2]),
             "achievements" => return cli::achievements_list(),
+            "stats" => return cli::stats(),
             "regen" => return cli::regen(),
             "rename" if args.len() >= 3 => {
                 let slug = &args[2];
@@ -139,6 +144,7 @@ struct Session {
     scores: ScoreStore,
     achievements_path: PathBuf,
     achievements: AchievementStore,
+    history_path: PathBuf,
     sfx: Option<SfxPlayer>,
 
     app: App,
@@ -148,6 +154,7 @@ struct Session {
     results: Option<ResultsScreen>,
     settings: Option<SettingsScreen>,
     calibrate: Option<CalibrateScreen>,
+    stats: Option<StatsScreen>,
 
     last_beatmap_path: Option<PathBuf>,
     last_audio_path: Option<PathBuf>,
@@ -165,6 +172,7 @@ impl Session {
         let scores = ScoreStore::load(&scores_path);
         let achievements_path = Config::cascade_dir().join("achievements.json");
         let achievements = AchievementStore::load(&achievements_path);
+        let history_path = Config::cascade_dir().join("play_history.json");
 
         let initial_difficulty = match config.gameplay.difficulty.as_str() {
             "easy" => Difficulty::Easy,
@@ -183,6 +191,7 @@ impl Session {
             scores,
             achievements_path,
             achievements,
+            history_path,
             sfx,
             app: App::new(),
             menu: MenuScreen::new(),
@@ -191,6 +200,7 @@ impl Session {
             results: None,
             settings: None,
             calibrate: None,
+            stats: None,
             last_beatmap_path: None,
             last_audio_path: None,
             last_song_title: String::new(),
@@ -235,6 +245,30 @@ impl Session {
         if !unlocked.is_empty() {
             let _ = self.achievements.save(&self.achievements_path);
         }
+
+        // Log to play_history. Failure to append is non-fatal: stats are nice
+        // to have, but must never crash the game loop.
+        let slug = cli::song_slug_from_path(&self.last_beatmap_path);
+        let record = PlayRecord {
+            ts: play_history::now_unix(),
+            slug,
+            title: self.last_song_title.clone(),
+            difficulty: diff_name.clone(),
+            mods: gp.mods.storage_key(),
+            score: gp.state.score,
+            accuracy: gp.state.accuracy(),
+            max_combo: gp.state.max_combo,
+            total_notes: gp.state.total_notes,
+            judgements: gp.state.judgement_counts,
+            duration_played_ms: gp.position_ms_in_track().min(gp.beatmap.song.duration_ms),
+            song_duration_ms: gp.beatmap.song.duration_ms,
+            grade: gp.state.grade().to_string(),
+            died: gp.state.is_dead(),
+        };
+        let mut history = PlayHistory::load(&self.history_path);
+        history.append(record);
+        let _ = history.save(&self.history_path);
+
         self.results = Some(ResultsScreen::new(
             gp.state,
             self.last_song_title.clone(),
@@ -503,6 +537,10 @@ fn dispatch_action(session: &mut Session, action: Action) -> Option<Action> {
             .calibrate
             .as_mut()
             .and_then(|cl| cl.handle_action(action)),
+        Screen::Stats => session
+            .stats
+            .as_mut()
+            .and_then(|sc| sc.handle_action(action)),
     }
 }
 
@@ -573,6 +611,12 @@ fn transition_to(
         Screen::Menu => {
             session.last_beatmap_path = None;
             session.last_audio_path = None;
+        }
+        Screen::Stats => {
+            let history = PlayHistory::load(&session.history_path);
+            let summary =
+                stats::summarize(&history, &session.achievements, play_history::now_unix());
+            session.stats = Some(StatsScreen::new(summary));
         }
     }
     session.app.navigate(screen);
@@ -727,6 +771,11 @@ fn draw(
             Screen::Calibrate => {
                 if let Some(cl) = &session.calibrate {
                     cl.render(frame, area);
+                }
+            }
+            Screen::Stats => {
+                if let Some(sc) = &session.stats {
+                    sc.render(frame, area);
                 }
             }
         }

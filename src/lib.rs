@@ -11,6 +11,8 @@ pub mod cli;
 pub mod config;
 pub mod game;
 pub mod input;
+pub mod play_history;
 pub mod score_store;
 pub mod screens;
+pub mod stats;
 pub mod ui;

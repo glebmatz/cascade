@@ -10,6 +10,17 @@ impl<'a> Widget for MenuList<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let start_y = area.y + (area.height.saturating_sub(self.items.len() as u16)) / 2;
 
+        // Center the whole block by the widest item so every row shares the
+        // same left edge — otherwise items jitter relative to one another.
+        let longest = self
+            .items
+            .iter()
+            .map(|s| s.chars().count())
+            .max()
+            .unwrap_or(0) as u16;
+        let block_w = longest + 2; // "> " / "  " prefix.
+        let x = area.x + (area.width.saturating_sub(block_w)) / 2;
+
         for (i, item) in self.items.iter().enumerate() {
             let y = start_y + i as u16;
             if y >= area.y + area.height {
@@ -23,8 +34,6 @@ impl<'a> Widget for MenuList<'a> {
             };
 
             let text = format!("{}{}", prefix, item);
-            let text_w = text.chars().count() as u16;
-            let x = area.x + (area.width.saturating_sub(text_w)) / 2;
             buf.set_string(x, y, &text, style);
         }
     }

@@ -63,6 +63,7 @@ hold-note release detection.
 - **Modifiers** — Hidden, Flashlight, Sudden Death, Perfect Only. Each combo gets its own best-score slot
 - **Practice mode** — loop any section at any speed from 0.25× to 2.0×, perfect for drilling that one run you keep bailing on
 - **Achievements** — 12 unlockables for combos, full clears, mod runs
+- **Stats dashboard** — aggregate play history with a 30-day accuracy sparkline and activity heatmap, both in the UI and via `cascade stats`
 - **Best scores** — persisted per song / difficulty / mod combo
 - **Calibration** — built-in metronome calibrator removes audio latency drift
 - **Terminal-native** — no Electron, no GPU, ~10 MB binary
@@ -131,6 +132,9 @@ cascade song my-favorite-song
 
 # Track unlocks:
 cascade achievements
+
+# Aggregate play stats (top songs, 30-day accuracy sparkline, activity heatmap):
+cascade stats
 
 # …or just run `cascade` for the full interactive UI.
 cascade
@@ -217,8 +221,9 @@ offset_ms = 0             # set by calibrator
 fps = 60
 ```
 
-Imported songs + generated beatmaps + best scores live under
-`~/.cascade/songs/`, `~/.cascade/scores.json`, and `~/.cascade/achievements.json`.
+Imported songs + generated beatmaps + best scores + play history live under
+`~/.cascade/songs/`, `~/.cascade/scores.json`, `~/.cascade/achievements.json`,
+and `~/.cascade/play_history.json`.
 
 ## Modifiers
 
@@ -283,6 +288,31 @@ milestones, and clearing songs with each modifier. The unlock list lives at
 cascade achievements
 ```
 
+## Stats
+
+Every non-practice run is logged to `~/.cascade/play_history.json`. Open the
+`Stats` entry from the main menu, or run:
+
+```sh
+cascade stats
+```
+
+You get:
+
+- **Totals** — lifetime plays, time played, notes hit.
+- **Top 5 songs** — ranked by play count; title updates with renames.
+- **Per-difficulty breakdown** — plays, best accuracy, best score, average
+  accuracy.
+- **30-day accuracy sparkline** — daily average accuracy for the last 30 days
+  rendered as unicode block glyphs. Blanks are days with no plays.
+- **30-day activity heatmap** — play count per day in five density levels
+  (`· ░ ▒ ▓ █`).
+- **Achievement progress** — unlocked out of total.
+
+Practice runs are excluded — they are for learning, not for stats. The file
+grows by about one kilobyte per 10 plays; a few thousand plays still loads
+instantly.
+
 ## How the beatmap generator works
 
 1. **Novelty**: short-time FFT with Hann window (2048 / 512 hop), per-band
@@ -323,7 +353,6 @@ Good places to start:
 - [ ] Online song sharing (upload beatmap JSON, not audio)
 - [ ] Multiplayer via terminal-to-terminal
 - [ ] Note editor for hand-tuning generated maps
-- [ ] `cascade stats` — aggregate play history
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 

@@ -12,7 +12,7 @@ const LOGO_LINES: &[&str] = &[
     r" \____\__,_|___/\___\__,_|\__,_|\___|",
 ];
 
-const MENU_ITEMS: &[&str] = &["Play", "Settings", "Quit"];
+const MENU_ITEMS: &[&str] = &["Play", "Stats", "Settings", "Quit"];
 
 #[derive(Clone, Copy)]
 struct BgStar {
@@ -100,8 +100,9 @@ impl MenuScreen {
             }
             Action::MenuSelect => match self.selected {
                 0 => Some(Action::Navigate(Screen::SongSelect)),
-                1 => Some(Action::Navigate(Screen::Settings)),
-                2 => Some(Action::Quit),
+                1 => Some(Action::Navigate(Screen::Stats)),
+                2 => Some(Action::Navigate(Screen::Settings)),
+                3 => Some(Action::Quit),
                 _ => None,
             },
             _ => None,

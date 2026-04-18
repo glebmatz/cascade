@@ -7,9 +7,11 @@ use crate::beatmap::types::{Beatmap, Difficulty, SongMeta};
 use crate::beatmap::{generator, loader};
 use crate::config::Config;
 use crate::game::practice::{self, PracticeSettings};
+use crate::play_history::{self, PlayHistory};
 use crate::score_store::ScoreStore;
 use crate::score_store::decompose_key;
 use crate::screens::song_select::find_audio_file;
+use crate::stats::{self, DiffRow, StatsSummary, TopSong};
 
 pub fn parse_difficulty_flag(args: &[String]) -> Option<Difficulty> {
     args.iter().find_map(|a| match a.as_str() {
@@ -113,6 +115,7 @@ pub fn print_help() -> Result<()> {
          --speed 0.25..2.0      practice: slow down / speed up\n                                  \
          (practice ignores mods and does not save scores)\n  \
          cascade achievements            List all achievements with unlock status\n  \
+         cascade stats                   Show aggregate play statistics\n  \
          cascade regen                   Regenerate beatmaps for every imported song\n  \
          cascade rename <slug> [--title NAME] [--artist NAME]\n                                  \
          Edit a song's title or artist\n  \
@@ -285,6 +288,94 @@ pub fn song(slug: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn stats() -> Result<()> {
+    let dir = Config::cascade_dir();
+    let history = PlayHistory::load(&dir.join("play_history.json"));
+    let ach = AchievementStore::load(&dir.join("achievements.json"));
+    let summary = stats::summarize(&history, &ach, play_history::now_unix());
+    print_stats(&summary);
+    Ok(())
+}
+
+fn print_stats(s: &StatsSummary) {
+    println!("Cascade — Statistics");
+    println!("{}", "─".repeat(40));
+
+    if s.total_plays == 0 {
+        println!("No plays yet. Play a song to start tracking stats.");
+        return;
+    }
+
+    println!("  Total plays:   {}", s.total_plays);
+    println!(
+        "  Time played:   {}",
+        stats::format_duration_ms(s.total_time_played_ms)
+    );
+    println!("  Notes hit:     {}", s.total_notes_hit);
+
+    println!();
+    println!("Top songs");
+    print_top_songs(&s.top_songs);
+
+    println!();
+    println!("By difficulty");
+    print_per_difficulty(&s.per_difficulty);
+
+    println!();
+    println!("Accuracy (last 30 days)");
+    let spark = stats::sparkline_30d(&s.accuracy_30d);
+    println!("  {}", spark);
+    let vals: Vec<f64> = s.accuracy_30d.iter().filter_map(|v| *v).collect();
+    if !vals.is_empty() {
+        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+        println!("  avg {:.1}%   (blanks = days with no plays)", mean);
+    } else {
+        println!("  (no plays in last 30 days)");
+    }
+
+    println!();
+    println!("Activity (last 30 days)");
+    let heat = stats::heatmap_glyphs(&s.heatmap_30d);
+    // Print with a space between chars for readability.
+    let spaced: String = heat.chars().flat_map(|c| [c, ' ']).collect();
+    println!("  {}", spaced.trim_end());
+    println!("  less  · ░ ▒ ▓ █  more");
+
+    println!();
+    println!(
+        "Achievements        {} / {} unlocked",
+        s.achievements_unlocked, s.achievements_total
+    );
+}
+
+fn print_top_songs(top: &[TopSong]) {
+    if top.is_empty() {
+        println!("  (none yet)");
+        return;
+    }
+    for (i, t) in top.iter().enumerate() {
+        let title: String = t.title.chars().take(36).collect();
+        println!("  {}. {:<36} {:>4} plays", i + 1, title, t.plays);
+    }
+}
+
+fn print_per_difficulty(rows: &[DiffRow]) {
+    if rows.is_empty() {
+        println!("  (none yet)");
+        return;
+    }
+    for d in rows {
+        println!(
+            "  {:<8} {:>4} plays   best {:>5.1}%  ({:>8})   avg {:>5.1}%",
+            d.difficulty.to_uppercase(),
+            d.plays,
+            d.best_accuracy,
+            d.best_score,
+            d.avg_accuracy,
+        );
+    }
 }
 
 pub fn achievements_list() -> Result<()> {
