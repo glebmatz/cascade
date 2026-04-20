@@ -600,10 +600,11 @@ impl GameplayScreen {
         let lane_w = area.width / 5;
         let lane_cx = area.x + lane as u16 * lane_w + lane_w / 2;
         let hit_py = (highway_h as i32) * 2 - 1;
+        let palette = crate::ui::theme::active();
         let color = match judgement {
-            Judgement::Perfect => (255, 240, 150),
-            Judgement::Great => (180, 240, 180),
-            _ => (170, 170, 170),
+            Judgement::Perfect => palette.particle[0],
+            Judgement::Great => palette.particle[1],
+            _ => palette.particle[2],
         };
         for i in 0..count {
             let angle = (i as f32 / count as f32) * std::f32::consts::PI + std::f32::consts::PI;

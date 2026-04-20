@@ -64,6 +64,7 @@ hold-note release detection.
 - **Practice mode** — loop any section at any speed from 0.25× to 2.0×, perfect for drilling that one run you keep bailing on
 - **Achievements** — 12 unlockables for combos, full clears, mod runs
 - **Stats dashboard** — aggregate play history with a 30-day accuracy sparkline and activity heatmap, both in the UI and via `cascade stats`
+- **Themes** — five built-in palettes (Classic / Neon / Mono / Sunset / Ocean); switch instantly from Settings
 - **Best scores** — persisted per song / difficulty / mod combo
 - **Calibration** — built-in metronome calibrator removes audio latency drift
 - **Terminal-native** — no Electron, no GPU, ~10 MB binary
@@ -219,6 +220,7 @@ offset_ms = 0             # set by calibrator
 
 [display]
 fps = 60
+theme = "classic"         # classic / neon / mono / sunset / ocean
 ```
 
 Imported songs + generated beatmaps + best scores + play history live under
@@ -287,6 +289,73 @@ milestones, and clearing songs with each modifier. The unlock list lives at
 ```sh
 cascade achievements
 ```
+
+## Themes
+
+Five palettes ship with the game and recolor lane backgrounds, notes, hit
+bursts, judgement splashes, and hit particles.
+
+| Slug | Vibe |
+|---|---|
+| `classic` | Default bright rainbow (red / green / yellow / blue / purple) |
+| `neon` | Cyberpunk — hot pink, cyan, electric violet |
+| `mono` | Grayscale, minimal, focused |
+| `sunset` | Warm gradient of crimson / orange / amber / rose |
+| `ocean` | Cool aqua / seafoam / deep blue / indigo |
+
+Pick one in `Main menu → Settings → Theme`. <kbd>D</kbd>/<kbd>F</kbd> cycles
+backward, <kbd>J</kbd>/<kbd>K</kbd> forward, <kbd>Enter</kbd> also advances.
+Changes apply instantly — no restart — and persist to
+`~/.cascade/config.toml` under `display.theme`.
+
+### Custom themes
+
+Drop a `.toml` file into `~/.cascade/themes/` and it shows up next to the
+built-ins in the Settings cycle. Built-in slugs (`classic`, `neon`, `mono`,
+`sunset`, `ocean`) are reserved — conflicting slugs are ignored. Each color
+is an `[r, g, b]` triple in `0..=255`.
+
+```toml
+# ~/.cascade/themes/cherry.toml
+slug = "cherry"
+name = "Cherry Blossom"
+
+# 5 lanes, in order: D / F / Space / J / K
+lane_colors = [
+  [250, 200, 210],
+  [255, 170, 190],
+  [240, 150, 180],
+  [200, 120, 170],
+  [160,  90, 150],
+]
+
+# Warm tint added to the highway as combo rises.
+combo_heat = [255, 150, 180]
+
+# Splash colors for Perfect / Great / Good / Miss.
+judgement = [
+  [255, 220, 230],
+  [230, 180, 200],
+  [180, 150, 170],
+  [200,  80, 120],
+]
+
+# Hit-particle colors for Perfect / Great / Good.
+particle = [
+  [255, 220, 230],
+  [230, 180, 200],
+  [200, 160, 180],
+]
+```
+
+Check that your files are valid with:
+
+```sh
+cascade themes
+```
+
+It lists built-ins + user themes and reports per-file issues (bad TOML,
+wrong array length, slug conflicts, duplicates).
 
 ## Stats
 

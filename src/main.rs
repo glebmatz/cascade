@@ -59,6 +59,7 @@ fn main() -> Result<()> {
             "song" if args.len() >= 3 => return cli::song(&args[2]),
             "achievements" => return cli::achievements_list(),
             "stats" => return cli::stats(),
+            "themes" => return cli::themes(),
             "regen" => return cli::regen(),
             "rename" if args.len() >= 3 => {
                 let slug = &args[2];
@@ -164,6 +165,14 @@ struct Session {
 impl Session {
     fn load() -> Result<Self> {
         let config = Config::load(&Config::default_path())?;
+        // Register user-defined themes first so they show up in cycling and
+        // can be resolved by slug, then apply the configured theme. Issues
+        // found while loading are silently dropped here — `cascade themes`
+        // surfaces them to the user outside of raw-terminal mode.
+        let themes_dir = Config::cascade_dir().join("themes");
+        let (user_themes, _issues) = ui::theme::load_themes_from(&themes_dir);
+        ui::theme::init_registry(user_themes);
+        ui::theme::set_active(ui::theme::resolve_or_default(&config.display.theme));
         let songs_dir = Config::cascade_dir().join("songs");
         std::fs::create_dir_all(&songs_dir)?;
         let scores_path = Config::cascade_dir().join("scores.json");

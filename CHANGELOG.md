@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-04-20
+
+### Added
+
+- **Custom themes** — drop `*.toml` files into `~/.cascade/themes/` and they
+  show up in the Settings cycle next to the five built-ins. Slug collisions
+  with built-ins are ignored; duplicate user slugs are skipped with a
+  reported issue. See `README.md → Custom themes` for the file format.
+- **`cascade themes`** CLI command — lists built-in + user themes and
+  reports per-file validation issues (bad TOML, wrong palette shape, slug
+  conflicts, duplicates).
+
+## [0.6.0] — 2026-04-20
+
+### Added
+
+- **Themes** — five built-in palettes (`Classic`, `Neon`, `Mono`, `Sunset`,
+  `Ocean`) that recolor lane backgrounds, note/hold trails, hit-zone bursts,
+  judgement splashes and hit particles. Pick one in
+  `Settings → Theme` with <kbd>D</kbd>/<kbd>F</kbd> (prev) and
+  <kbd>J</kbd>/<kbd>K</kbd> (next), or <kbd>Enter</kbd> to advance; changes
+  apply instantly without restart and persist to
+  `~/.cascade/config.toml → display.theme`.
+- **Palette preview** on the Settings screen — while the Theme row is
+  focused, a five-block preview of the current palette renders below it.
+
 ## [0.5.0] — 2026-04-18
 
 ### Added
@@ -158,7 +184,9 @@ First public release.
   `cascade regen`, `cascade help`.
 - **Dual MIT / Apache-2.0 licensing**.
 
-[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/glebmatz/cascade/releases/tag/v0.6.1
+[0.6.0]: https://github.com/glebmatz/cascade/releases/tag/v0.6.0
 [0.5.0]: https://github.com/glebmatz/cascade/releases/tag/v0.5.0
 [0.4.1]: https://github.com/glebmatz/cascade/releases/tag/v0.4.1
 [0.4.0]: https://github.com/glebmatz/cascade/releases/tag/v0.4.0

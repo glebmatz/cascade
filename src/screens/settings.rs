@@ -1,6 +1,7 @@
 use crate::app::{Action, Screen};
 use crate::config::Config;
 use crate::ui::chrome::{render_bottom_bar, render_top_bar};
+use crate::ui::theme;
 use ratatui::prelude::*;
 
 const SETTINGS_ITEMS: &[&str] = &[
@@ -9,9 +10,20 @@ const SETTINGS_ITEMS: &[&str] = &[
     "Audio Offset (ms)",
     "Health",
     "Hold Notes",
+    "Theme",
     "Calibrate Audio",
     "Back",
 ];
+
+// Index constants so the match arms in handle_action stay readable as items shift.
+const IDX_SCROLL_SPEED: usize = 0;
+const IDX_VOLUME: usize = 1;
+const IDX_OFFSET: usize = 2;
+const IDX_HEALTH: usize = 3;
+const IDX_HOLDS: usize = 4;
+const IDX_THEME: usize = 5;
+const IDX_CALIBRATE: usize = 6;
+const IDX_BACK: usize = 7;
 
 pub struct SettingsScreen {
     pub config: Config,
@@ -42,28 +54,32 @@ impl SettingsScreen {
                 }
                 None
             }
-            Action::MenuSelect => {
-                if self.selected == SETTINGS_ITEMS.len() - 1 {
+            Action::MenuSelect => match self.selected {
+                IDX_BACK => {
                     self.save_if_modified();
                     Some(Action::Navigate(Screen::Menu))
-                } else if self.selected == 3 {
-                    // Toggle health
+                }
+                IDX_HEALTH => {
                     self.config.gameplay.health_enabled = !self.config.gameplay.health_enabled;
                     self.modified = true;
                     None
-                } else if self.selected == 4 {
-                    // Toggle hold notes
+                }
+                IDX_HOLDS => {
                     self.config.gameplay.holds_enabled = !self.config.gameplay.holds_enabled;
                     self.modified = true;
                     None
-                } else if self.selected == 5 {
-                    // Launch calibration
-                    self.save_if_modified();
-                    Some(Action::Navigate(Screen::Calibrate))
-                } else {
+                }
+                IDX_THEME => {
+                    // Enter advances to the next theme, same as the right lane keys.
+                    self.advance_theme(true);
                     None
                 }
-            }
+                IDX_CALIBRATE => {
+                    self.save_if_modified();
+                    Some(Action::Navigate(Screen::Calibrate))
+                }
+                _ => None,
+            },
             Action::Back | Action::Pause => {
                 self.save_if_modified();
                 Some(Action::Navigate(Screen::Menu))
@@ -72,7 +88,7 @@ impl SettingsScreen {
                 let increase = lane == 3 || lane == 4;
                 let decrease = lane == 0 || lane == 1;
                 match self.selected {
-                    0 => {
+                    IDX_SCROLL_SPEED => {
                         if increase {
                             self.config.gameplay.scroll_speed =
                                 (self.config.gameplay.scroll_speed + 0.1).min(2.0);
@@ -83,7 +99,7 @@ impl SettingsScreen {
                         }
                         self.modified = true;
                     }
-                    1 => {
+                    IDX_VOLUME => {
                         if increase {
                             self.config.audio.volume = (self.config.audio.volume + 0.05).min(1.0);
                         }
@@ -92,7 +108,7 @@ impl SettingsScreen {
                         }
                         self.modified = true;
                     }
-                    2 => {
+                    IDX_OFFSET => {
                         if increase {
                             self.config.audio.offset_ms =
                                 (self.config.audio.offset_ms + 5).min(200);
@@ -103,15 +119,21 @@ impl SettingsScreen {
                         }
                         self.modified = true;
                     }
-                    3 => {
-                        // Toggle health with any lane key
+                    IDX_HEALTH => {
                         self.config.gameplay.health_enabled = !self.config.gameplay.health_enabled;
                         self.modified = true;
                     }
-                    4 => {
-                        // Toggle hold notes with any lane key
+                    IDX_HOLDS => {
                         self.config.gameplay.holds_enabled = !self.config.gameplay.holds_enabled;
                         self.modified = true;
+                    }
+                    IDX_THEME => {
+                        if increase {
+                            self.advance_theme(true);
+                        }
+                        if decrease {
+                            self.advance_theme(false);
+                        }
                     }
                     _ => {}
                 }
@@ -125,6 +147,21 @@ impl SettingsScreen {
         if self.modified {
             let _ = self.config.save(&Config::default_path());
         }
+    }
+
+    /// Cycle the active theme and persist the new slug to config. `forward =
+    /// false` cycles backward. The global active palette is updated
+    /// immediately so the next frame already uses it.
+    fn advance_theme(&mut self, forward: bool) {
+        let current = self.config.display.theme.as_str();
+        let next = if forward {
+            theme::cycle_next(current)
+        } else {
+            theme::cycle_prev(current)
+        };
+        self.config.display.theme = next.slug.to_string();
+        theme::set_active(next);
+        self.modified = true;
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
@@ -178,12 +215,16 @@ impl SettingsScreen {
         } else {
             "OFF"
         };
+        let theme_name = theme::resolve_or_default(&self.config.display.theme)
+            .name
+            .to_string();
         let values = [
             format!("{:.1}", self.config.gameplay.scroll_speed),
             format!("{:.0}%", self.config.audio.volume * 100.0),
             format!("{:+}ms", self.config.audio.offset_ms),
             health_str.to_string(),
             holds_str.to_string(),
+            theme_name,
             String::new(),
             String::new(),
         ];
@@ -197,7 +238,7 @@ impl SettingsScreen {
 
             let text = if value.is_empty() {
                 format!("{}{}", prefix, item)
-            } else if i == 3 || i == 4 {
+            } else if i == IDX_HEALTH || i == IDX_HOLDS {
                 // Toggle items — show differently
                 format!("{}{}:  [ {} ]", prefix, item, value)
             } else {
@@ -210,6 +251,28 @@ impl SettingsScreen {
             y += 2;
         }
 
+        // Render a small palette preview under the Theme row so users can see
+        // the lane colors change as they cycle.
+        if self.selected == IDX_THEME {
+            let current = theme::resolve_or_default(&self.config.display.theme);
+            render_palette_preview(buf, cx, y, &current);
+        }
+
         let _ = cx;
+    }
+}
+
+fn render_palette_preview(buf: &mut Buffer, cx: u16, y: u16, t: &theme::Theme) {
+    // 5 colored blocks, 4 cells wide each, with a 1-cell gap.
+    let block_w: u16 = 4;
+    let gap: u16 = 1;
+    let total_w = 5 * block_w + 4 * gap;
+    let start_x = cx.saturating_sub(total_w / 2);
+    for (i, rgb) in t.lane_colors.iter().enumerate() {
+        let bx = start_x + i as u16 * (block_w + gap);
+        let color = Color::Rgb(rgb.0, rgb.1, rgb.2);
+        for dx in 0..block_w {
+            buf.set_string(bx + dx, y, " ", Style::default().bg(color));
+        }
     }
 }

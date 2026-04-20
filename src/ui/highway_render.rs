@@ -7,18 +7,11 @@ use crate::game::hit_judge::Judgement;
 use crate::game::modifiers::{Modifier, Mods};
 use crate::ui::color::{Rgb, add as color_add, mul as color_mul, smoothstep};
 use crate::ui::pixel_buffer::PixelBuffer;
+use crate::ui::theme;
 
 const LANE_COUNT: usize = 5;
 const NOTE_PX_HEIGHT: i32 = 3;
 const ANTICIPATION_MS: f64 = 250.0;
-
-const LANE_COLORS: [Rgb; LANE_COUNT] = [
-    (220, 80, 80),  // D — red
-    (80, 200, 90),  // F — green
-    (230, 210, 80), // _ — yellow
-    (80, 140, 230), // J — blue
-    (190, 80, 220), // K — purple
-];
 
 pub struct HighwayWidget<'a> {
     pub notes: &'a [VisibleNote],
@@ -131,15 +124,19 @@ impl<'a> Widget for HighwayWidget<'a> {
         }
         let height_px = highway_height as i32 * 2;
 
+        // Snapshot the active theme once per frame so a mid-frame switch can't
+        // produce inconsistent palettes within a single draw call.
+        let theme = theme::active();
+
         let mut px = PixelBuffer::new(area.width, height_px);
         let local_x = |ax: u16| -> u16 { ax.saturating_sub(area.x) };
         let combo_heat = ((self.combo as f32 / 50.0).min(1.0)).powf(0.7);
 
         self.draw_starfield(&mut px, &local_x);
-        self.draw_lane_backgrounds(&mut px, &local_x, area, highway_height, combo_heat);
-        self.draw_lane_bursts(&mut px, &local_x, area, highway_height);
-        self.draw_hold_trails(&mut px, &local_x, area, highway_height);
-        self.draw_notes(&mut px, &local_x, area, highway_height);
+        self.draw_lane_backgrounds(&mut px, &local_x, area, highway_height, combo_heat, &theme);
+        self.draw_lane_bursts(&mut px, &local_x, area, highway_height, &theme);
+        self.draw_hold_trails(&mut px, &local_x, area, highway_height, &theme);
+        self.draw_notes(&mut px, &local_x, area, highway_height, &theme);
         self.draw_particles(&mut px, &local_x);
         apply_vignette(&mut px, area.width, height_px);
         if self.mods.contains(Modifier::Flashlight) {
@@ -150,8 +147,8 @@ impl<'a> Widget for HighwayWidget<'a> {
         if !self.spectrum_bands.is_empty() {
             self.draw_spectrum_margins(buf, area, highway_height);
         }
-        self.draw_hit_zone(buf, area, highway_height);
-        self.draw_judgement_feedback(buf, area, highway_height);
+        self.draw_hit_zone(buf, area, highway_height, &theme);
+        self.draw_judgement_feedback(buf, area, highway_height, &theme);
     }
 }
 
@@ -175,6 +172,7 @@ impl<'a> HighwayWidget<'a> {
         area: Rect,
         highway_height: u16,
         combo_heat: f32,
+        theme: &theme::Theme,
     ) {
         let height_px = highway_height as i32 * 2;
         for py in 0..height_px {
@@ -185,8 +183,8 @@ impl<'a> HighwayWidget<'a> {
             for lane in 0..LANE_COUNT {
                 let (lx, lw) = self.lane_rect(lane, row, highway_height, area);
                 let base_intensity = (t * 0.09 + 0.02) * energy_mul;
-                let bg = color_mul(LANE_COLORS[lane], base_intensity);
-                let heat = color_mul((230, 80, 40), combo_heat * 0.06 * t);
+                let bg = color_mul(theme.lane_colors[lane], base_intensity);
+                let heat = color_mul(theme.combo_heat, combo_heat * 0.06 * t);
                 let color = color_add(bg, heat);
 
                 for cx in lx..lx + lw {
@@ -216,6 +214,7 @@ impl<'a> HighwayWidget<'a> {
         local_x: &impl Fn(u16) -> u16,
         area: Rect,
         highway_height: u16,
+        theme: &theme::Theme,
     ) {
         let height_px = highway_height as i32 * 2;
         for lane in 0..LANE_COUNT {
@@ -224,7 +223,7 @@ impl<'a> HighwayWidget<'a> {
                 continue;
             }
             let strength = burst as f32 / 8.0;
-            let color = color_mul(LANE_COLORS[lane], 0.8);
+            let color = color_mul(theme.lane_colors[lane], 0.8);
             let streak_len = (height_px as f32 * (0.25 + 0.3 * strength)) as i32;
             for dy in 0..streak_len {
                 let py = height_px - 1 - dy;
@@ -246,6 +245,7 @@ impl<'a> HighwayWidget<'a> {
         local_x: &impl Fn(u16) -> u16,
         area: Rect,
         highway_height: u16,
+        theme: &theme::Theme,
     ) {
         let height_px = highway_height as i32 * 2;
         let hidden = self.mods.contains(Modifier::Hidden);
@@ -261,7 +261,7 @@ impl<'a> HighwayWidget<'a> {
             }
             let py_top = ((1.0 - trail_top.clamp(0.0, 1.0)) * height_px as f64) as i32;
             let py_bot = ((1.0 - note.position.clamp(0.0, 1.0)) * height_px as f64) as i32;
-            let lane_color = LANE_COLORS[note.lane as usize % LANE_COUNT];
+            let lane_color = theme.lane_colors[note.lane as usize % LANE_COUNT];
 
             for py in py_top.max(0)..=py_bot.min(height_px - 1) {
                 let row = (py / 2) as u16;
@@ -287,6 +287,7 @@ impl<'a> HighwayWidget<'a> {
         local_x: &impl Fn(u16) -> u16,
         area: Rect,
         highway_height: u16,
+        theme: &theme::Theme,
     ) {
         let height_px = highway_height as i32 * 2;
         let hidden = self.mods.contains(Modifier::Hidden);
@@ -302,7 +303,7 @@ impl<'a> HighwayWidget<'a> {
             let center_py = ((1.0 - note.position) * height_px as f64) as i32;
             let row = (center_py / 2).clamp(0, highway_height as i32 - 1) as u16;
             let (lx, lw) = self.lane_rect(note.lane as usize, row, highway_height, area);
-            let lane_color = LANE_COLORS[note.lane as usize % LANE_COUNT];
+            let lane_color = theme.lane_colors[note.lane as usize % LANE_COUNT];
 
             let note_w = lw.saturating_sub(1).max(1);
             let note_x = lx + lw.saturating_sub(note_w) / 2;
@@ -384,7 +385,13 @@ impl<'a> HighwayWidget<'a> {
         }
     }
 
-    fn draw_hit_zone(&self, buf: &mut Buffer, area: Rect, highway_height: u16) {
+    fn draw_hit_zone(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        highway_height: u16,
+        theme: &theme::Theme,
+    ) {
         let hit_y = area.y + highway_height;
         if hit_y >= area.y + area.height {
             return;
@@ -394,7 +401,7 @@ impl<'a> HighwayWidget<'a> {
 
         for (i, label) in self.lane_labels.iter().enumerate() {
             let (lx, lw) = self.lane_rect(i, highway_height, highway_height, area);
-            let base_color = LANE_COLORS[i];
+            let base_color = theme.lane_colors[i];
             let flash = self.hit_flash[i];
             let pulse_intensity = if flash > 0 {
                 (flash as f32 / 8.0).min(1.0)
@@ -448,7 +455,13 @@ impl<'a> HighwayWidget<'a> {
         out
     }
 
-    fn draw_judgement_feedback(&self, buf: &mut Buffer, area: Rect, highway_height: u16) {
+    fn draw_judgement_feedback(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        highway_height: u16,
+        theme: &theme::Theme,
+    ) {
         let feedback_y = area.y + highway_height + 1;
         if feedback_y >= area.y + area.height {
             return;
@@ -470,10 +483,10 @@ impl<'a> HighwayWidget<'a> {
         let fade = (1.0 - progress).powf(0.7);
 
         let (text, base_color) = match judgement {
-            Judgement::Perfect => ("PERFECT!", (255, 240, 150)),
-            Judgement::Great => ("GREAT", (180, 240, 180)),
-            Judgement::Good => ("good", (170, 170, 170)),
-            Judgement::Miss => ("miss", (200, 80, 80)),
+            Judgement::Perfect => ("PERFECT!", theme.judgement[0]),
+            Judgement::Great => ("GREAT", theme.judgement[1]),
+            Judgement::Good => ("good", theme.judgement[2]),
+            Judgement::Miss => ("miss", theme.judgement[3]),
         };
         let color = color_mul(base_color, fade);
         let tw = (text.len() as f32 * scale).ceil() as u16;

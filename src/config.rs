@@ -38,6 +38,12 @@ pub struct AudioConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DisplayConfig {
     pub fps: u32,
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+fn default_theme() -> String {
+    "classic".to_string()
 }
 
 impl Default for Config {
@@ -56,7 +62,10 @@ impl Default for Config {
                 volume: 0.8,
                 offset_ms: 0,
             },
-            display: DisplayConfig { fps: 60 },
+            display: DisplayConfig {
+                fps: 60,
+                theme: default_theme(),
+            },
         }
     }
 }

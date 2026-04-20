@@ -12,6 +12,7 @@ use crate::score_store::ScoreStore;
 use crate::score_store::decompose_key;
 use crate::screens::song_select::find_audio_file;
 use crate::stats::{self, DiffRow, StatsSummary, TopSong};
+use crate::ui::theme;
 
 pub fn parse_difficulty_flag(args: &[String]) -> Option<Difficulty> {
     args.iter().find_map(|a| match a.as_str() {
@@ -116,6 +117,7 @@ pub fn print_help() -> Result<()> {
          (practice ignores mods and does not save scores)\n  \
          cascade achievements            List all achievements with unlock status\n  \
          cascade stats                   Show aggregate play statistics\n  \
+         cascade themes                  List built-in + user themes, validate files\n  \
          cascade regen                   Regenerate beatmaps for every imported song\n  \
          cascade rename <slug> [--title NAME] [--artist NAME]\n                                  \
          Edit a song's title or artist\n  \
@@ -287,6 +289,38 @@ pub fn song(slug: &str) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+pub fn themes() -> Result<()> {
+    let dir = Config::cascade_dir().join("themes");
+    let (user, issues) = theme::load_themes_from(&dir);
+
+    println!("Built-in themes");
+    for t in &theme::BUILTINS {
+        println!("  {:<10} {}", t.slug, t.name);
+    }
+
+    println!();
+    println!("User themes  (loaded from {})", dir.display());
+    if !dir.exists() {
+        println!("  (directory does not exist yet — create it and drop .toml files there)");
+    } else if user.is_empty() {
+        println!("  (none)");
+    } else {
+        for t in &user {
+            println!("  {:<10} {}", t.slug, t.name);
+        }
+    }
+
+    if !issues.is_empty() {
+        println!();
+        println!("Issues");
+        for issue in &issues {
+            println!("  {}  →  {}", issue.path, issue.reason);
+        }
+    }
+
     Ok(())
 }
 
