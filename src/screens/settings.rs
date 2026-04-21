@@ -9,6 +9,7 @@ const SETTINGS_ITEMS: &[&str] = &[
     "Volume",
     "Audio Offset (ms)",
     "Health",
+    "Drain Mode",
     "Hold Notes",
     "Theme",
     "Calibrate Audio",
@@ -20,10 +21,11 @@ const IDX_SCROLL_SPEED: usize = 0;
 const IDX_VOLUME: usize = 1;
 const IDX_OFFSET: usize = 2;
 const IDX_HEALTH: usize = 3;
-const IDX_HOLDS: usize = 4;
-const IDX_THEME: usize = 5;
-const IDX_CALIBRATE: usize = 6;
-const IDX_BACK: usize = 7;
+const IDX_DRAIN: usize = 4;
+const IDX_HOLDS: usize = 5;
+const IDX_THEME: usize = 6;
+const IDX_CALIBRATE: usize = 7;
+const IDX_BACK: usize = 8;
 
 pub struct SettingsScreen {
     pub config: Config,
@@ -64,6 +66,11 @@ impl SettingsScreen {
                     self.modified = true;
                     None
                 }
+                IDX_DRAIN => {
+                    self.config.gameplay.drain_mode = !self.config.gameplay.drain_mode;
+                    self.modified = true;
+                    None
+                }
                 IDX_HOLDS => {
                     self.config.gameplay.holds_enabled = !self.config.gameplay.holds_enabled;
                     self.modified = true;
@@ -84,7 +91,7 @@ impl SettingsScreen {
                 self.save_if_modified();
                 Some(Action::Navigate(Screen::Menu))
             }
-            Action::GameKey(lane) => {
+            Action::GameKey(lane) | Action::GameKeyHeld(lane) => {
                 let increase = lane == 3 || lane == 4;
                 let decrease = lane == 0 || lane == 1;
                 match self.selected {
@@ -121,6 +128,10 @@ impl SettingsScreen {
                     }
                     IDX_HEALTH => {
                         self.config.gameplay.health_enabled = !self.config.gameplay.health_enabled;
+                        self.modified = true;
+                    }
+                    IDX_DRAIN => {
+                        self.config.gameplay.drain_mode = !self.config.gameplay.drain_mode;
                         self.modified = true;
                     }
                     IDX_HOLDS => {
@@ -210,6 +221,11 @@ impl SettingsScreen {
         } else {
             "OFF"
         };
+        let drain_str = if self.config.gameplay.drain_mode {
+            "ON"
+        } else {
+            "OFF"
+        };
         let holds_str = if self.config.gameplay.holds_enabled {
             "ON"
         } else {
@@ -223,6 +239,7 @@ impl SettingsScreen {
             format!("{:.0}%", self.config.audio.volume * 100.0),
             format!("{:+}ms", self.config.audio.offset_ms),
             health_str.to_string(),
+            drain_str.to_string(),
             holds_str.to_string(),
             theme_name,
             String::new(),
@@ -238,7 +255,7 @@ impl SettingsScreen {
 
             let text = if value.is_empty() {
                 format!("{}{}", prefix, item)
-            } else if i == IDX_HEALTH || i == IDX_HOLDS {
+            } else if i == IDX_HEALTH || i == IDX_DRAIN || i == IDX_HOLDS {
                 // Toggle items — show differently
                 format!("{}{}:  [ {} ]", prefix, item, value)
             } else {

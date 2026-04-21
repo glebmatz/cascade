@@ -105,7 +105,7 @@ pub fn print_help() -> Result<()> {
         "Cascade — terminal rhythm game\n\n\
          Usage:\n  \
          cascade                         Launch the interactive UI\n  \
-         cascade add <path>              Import an audio file and generate beatmaps\n  \
+         cascade add <path>              Import an audio file — or a whole folder, recursively\n  \
          cascade list                    List all imported songs with best scores\n  \
          cascade song <slug>             Show detailed stats for one song (all mods/diffs)\n  \
          cascade play <slug> [--diff] [--mods CODES] [--section RANGE] [--speed N]\n                                  \
@@ -127,12 +127,16 @@ pub fn print_help() -> Result<()> {
 }
 
 pub fn add(path_str: &str) -> Result<()> {
-    let file_path = PathBuf::from(path_str);
+    let path = PathBuf::from(path_str);
     let songs_dir = Config::cascade_dir().join("songs");
     std::fs::create_dir_all(&songs_dir)?;
 
-    println!("Importing {}...", file_path.display());
-    let song = import::import_local_file(&file_path, &songs_dir)?;
+    if path.is_dir() {
+        return add_batch(&path, &songs_dir);
+    }
+
+    println!("Importing {}...", path.display());
+    let song = import::import_local_file(&path, &songs_dir)?;
 
     let display = if song.artist.is_empty() {
         song.title.clone()
@@ -143,6 +147,79 @@ pub fn add(path_str: &str) -> Result<()> {
     regenerate_for_dir(&song.dir, &song.audio_path, &song.title, &song.artist)?;
 
     println!("Successfully imported: {}", display);
+    Ok(())
+}
+
+/// Recursively collect audio files from a directory and import each one.
+/// Partial failures are reported inline but don't abort the batch.
+fn add_batch(dir: &Path, songs_dir: &Path) -> Result<()> {
+    const SUPPORTED: &[&str] = &["mp3", "wav", "flac", "ogg", "m4a", "webm", "opus"];
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_audio_files(dir, SUPPORTED, &mut files)?;
+    files.sort();
+
+    if files.is_empty() {
+        println!(
+            "No audio files found under {}. Supported: {}",
+            dir.display(),
+            SUPPORTED.join(", ")
+        );
+        return Ok(());
+    }
+
+    println!(
+        "Batch import: {} file(s) under {}",
+        files.len(),
+        dir.display()
+    );
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+    for (i, file) in files.iter().enumerate() {
+        println!("[{}/{}] {}", i + 1, files.len(), file.display());
+        match import::import_local_file(file, songs_dir) {
+            Ok(song) => {
+                let display = if song.artist.is_empty() {
+                    song.title.clone()
+                } else {
+                    format!("{} — {}", song.artist, song.title)
+                };
+                match regenerate_for_dir(&song.dir, &song.audio_path, &song.title, &song.artist) {
+                    Ok(()) => {
+                        ok += 1;
+                        println!("       ok — {}", display);
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        eprintln!("       beatmap error: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("       import error: {}", e);
+            }
+        }
+    }
+    println!("\nImported: {} / {}  ({} failed)", ok, files.len(), failed);
+    Ok(())
+}
+
+fn collect_audio_files(dir: &Path, exts: &[&str], out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            collect_audio_files(&p, exts, out)?;
+            continue;
+        }
+        let ext = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+        if exts.iter().any(|e| *e == ext) {
+            out.push(p);
+        }
+    }
     Ok(())
 }
 

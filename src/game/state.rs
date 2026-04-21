@@ -10,6 +10,8 @@ pub struct GameState {
     pub last_judgement: Option<Judgement>,
     pub judgement_counts: [u32; 4],
     pub health: f64,
+    /// Drain mode: health falls over time. Only Perfects give meaningful restore.
+    pub drain_mode: bool,
 }
 
 impl Default for GameState {
@@ -30,6 +32,7 @@ impl GameState {
             last_judgement: None,
             judgement_counts: [0; 4],
             health: 1.0,
+            drain_mode: false,
         }
     }
 
@@ -37,16 +40,41 @@ impl GameState {
         self.health <= 0.0
     }
 
+    /// Constant health drain per second. Calibrated so a run that lands mostly
+    /// Greats barely stays alive; Perfect-heavy runs comfortably top up.
+    pub const DRAIN_PER_SECOND: f64 = 0.05;
+
+    /// Apply continuous drain for a frame of `dt_ms` milliseconds. No-op unless
+    /// `drain_mode` is set. Does not clamp below 0 — callers check `is_dead`.
+    pub fn tick_drain(&mut self, dt_ms: u64) {
+        if !self.drain_mode {
+            return;
+        }
+        let dt_s = dt_ms as f64 / 1000.0;
+        self.health = (self.health - Self::DRAIN_PER_SECOND * dt_s).max(0.0);
+    }
+
     pub fn register_judgement(&mut self, judgement: Judgement) {
         self.total_notes += 1;
         self.max_possible_points += Judgement::max_points();
         self.last_judgement = Some(judgement);
 
-        let health_delta = match judgement {
-            Judgement::Perfect => 0.02,
-            Judgement::Great => 0.01,
-            Judgement::Good => 0.0,
-            Judgement::Miss => -0.08,
+        // Drain mode rebalances health deltas: Perfects heal more to offset
+        // constant drain; non-Perfects give almost nothing.
+        let health_delta = if self.drain_mode {
+            match judgement {
+                Judgement::Perfect => 0.035,
+                Judgement::Great => 0.005,
+                Judgement::Good => -0.01,
+                Judgement::Miss => -0.10,
+            }
+        } else {
+            match judgement {
+                Judgement::Perfect => 0.02,
+                Judgement::Great => 0.01,
+                Judgement::Good => 0.0,
+                Judgement::Miss => -0.08,
+            }
         };
         self.health = (self.health + health_delta).clamp(0.0, 1.0);
 

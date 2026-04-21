@@ -30,6 +30,9 @@ pub struct HighwayWidget<'a> {
     pub current_ms: u64,
     pub look_ahead_ms: f64,
     pub mods: Mods,
+    /// Chromatic aberration strength in 0..=1. Peaks on a Perfect hit and
+    /// decays over a few frames. Splits R/B channels ±1px horizontally.
+    pub aberration: f32,
 }
 
 impl<'a> HighwayWidget<'a> {
@@ -51,11 +54,17 @@ impl<'a> HighwayWidget<'a> {
             current_ms: 0,
             look_ahead_ms: 2000.0,
             mods: Mods::new(),
+            aberration: 0.0,
         }
     }
 
     pub fn with_mods(mut self, mods: Mods) -> Self {
         self.mods = mods;
+        self
+    }
+
+    pub fn with_aberration(mut self, v: f32) -> Self {
+        self.aberration = v.clamp(0.0, 1.0);
         self
     }
 
@@ -141,6 +150,9 @@ impl<'a> Widget for HighwayWidget<'a> {
         apply_vignette(&mut px, area.width, height_px);
         if self.mods.contains(Modifier::Flashlight) {
             apply_flashlight(&mut px, area.width, height_px);
+        }
+        if self.aberration > 0.0 {
+            apply_aberration(&mut px, area.width, height_px, self.aberration);
         }
         flush_pixels(buf, &px, area, highway_height);
 
@@ -261,14 +273,38 @@ impl<'a> HighwayWidget<'a> {
             }
             let py_top = ((1.0 - trail_top.clamp(0.0, 1.0)) * height_px as f64) as i32;
             let py_bot = ((1.0 - note.position.clamp(0.0, 1.0)) * height_px as f64) as i32;
-            let lane_color = theme.lane_colors[note.lane as usize % LANE_COUNT];
+            let src_lane = note.lane as usize;
+            let dst_lane = note.slide_to.map(|l| l as usize).unwrap_or(src_lane);
+            let is_slide = dst_lane != src_lane;
+            // Slides tint toward the target lane color to preview the transition.
+            let color_base = if is_slide {
+                let src_c = theme.lane_colors[src_lane % LANE_COUNT];
+                let dst_c = theme.lane_colors[dst_lane % LANE_COUNT];
+                (
+                    ((src_c.0 as u16 + dst_c.0 as u16) / 2) as u8,
+                    ((src_c.1 as u16 + dst_c.1 as u16) / 2) as u8,
+                    ((src_c.2 as u16 + dst_c.2 as u16) / 2) as u8,
+                )
+            } else {
+                theme.lane_colors[src_lane % LANE_COUNT]
+            };
+            let span_px = (py_bot - py_top).max(1) as f32;
 
             for py in py_top.max(0)..=py_bot.min(height_px - 1) {
                 let row = (py / 2) as u16;
-                let (lx, lw) = self.lane_rect(note.lane as usize, row, highway_height, area);
-                let center = lx + lw / 2;
+                // Interpolation from source (bottom, py_bot) up to target (top, py_top).
+                // Smoothstep so the slide reads as an arc rather than a linear diagonal.
+                let t_linear = ((py_bot - py) as f32 / span_px).clamp(0.0, 1.0);
+                let t = crate::ui::color::smoothstep(0.0, 1.0, t_linear);
+                let (src_lx, src_lw) = self.lane_rect(src_lane, row, highway_height, area);
+                let (dst_lx, dst_lw) = self.lane_rect(dst_lane, row, highway_height, area);
+                let src_cx = src_lx as f32 + src_lw as f32 * 0.5;
+                let dst_cx = dst_lx as f32 + dst_lw as f32 * 0.5;
+                let cx = src_cx * (1.0 - t) + dst_cx * t;
+                let center = cx as u16;
+
                 let intensity = (py as f32 / height_px as f32) * 0.55 + 0.45;
-                let color = color_mul(lane_color, intensity);
+                let color = color_mul(color_base, intensity);
 
                 px.blend(local_x(center), py, color, 0.9);
                 if center > area.x {
@@ -276,6 +312,23 @@ impl<'a> HighwayWidget<'a> {
                 }
                 if center + 1 < area.x + area.width {
                     px.blend(local_x(center + 1), py, color, 0.35);
+                }
+            }
+
+            // Slide tail: small chevron/arrow hint at the target-lane top of the
+            // trail so the player can read the direction at a glance.
+            if is_slide && py_top >= 0 && !hidden {
+                let row = (py_top / 2) as u16;
+                let (lx, lw) = self.lane_rect(dst_lane, row, highway_height, area);
+                let cx = lx + lw / 2;
+                let dst_c = theme.lane_colors[dst_lane % LANE_COUNT];
+                let tip_color = color_mul(dst_c, 1.0);
+                // Two-pixel-wide dot on the target lane axis.
+                for dx in -1..=1i32 {
+                    let x = cx as i32 + dx;
+                    if x >= area.x as i32 && x < (area.x + area.width) as i32 {
+                        px.blend(local_x(x as u16), py_top, tip_color, 0.85);
+                    }
                 }
             }
         }
@@ -549,6 +602,44 @@ fn apply_vignette(px: &mut PixelBuffer, width: u16, height_px: i32) {
                 let cur = px.get(x, py);
                 px.set(x, py, color_mul(cur, 0.4 + 0.6 * v));
             }
+        }
+    }
+}
+
+/// Chromatic aberration: shift the R channel one pixel right and the B channel
+/// one pixel left, blending with the original by `strength`. Cheap RGB split
+/// post-process used to punctuate Perfect hits.
+fn apply_aberration(px: &mut PixelBuffer, width: u16, height_px: i32, strength: f32) {
+    let strength = strength.clamp(0.0, 1.0);
+    if strength <= 0.0 || width < 3 {
+        return;
+    }
+    // Snapshot once; we read from the original buffer and write into `px`.
+    let mut rows: Vec<Vec<Rgb>> = Vec::with_capacity(height_px as usize);
+    for py in 0..height_px {
+        let mut row: Vec<Rgb> = Vec::with_capacity(width as usize);
+        for x in 0..width {
+            row.push(px.get(x, py));
+        }
+        rows.push(row);
+    }
+    for py in 0..height_px {
+        let row = &rows[py as usize];
+        for x in 0..width {
+            let orig = row[x as usize];
+            // R shifts right, B shifts left. Out-of-bounds neighbours fall back to the origin pixel.
+            let r_src = if x == 0 { orig } else { row[(x - 1) as usize] };
+            let b_src = if x + 1 >= width {
+                orig
+            } else {
+                row[(x + 1) as usize]
+            };
+            let mixed = (
+                (orig.0 as f32 * (1.0 - strength) + r_src.0 as f32 * strength) as u8,
+                orig.1,
+                (orig.2 as f32 * (1.0 - strength) + b_src.2 as f32 * strength) as u8,
+            );
+            px.set(x, py, mixed);
         }
     }
 }

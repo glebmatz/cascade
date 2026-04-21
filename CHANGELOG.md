@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-04-21
+
+### Added
+
+- **Slide notes** — a hold can now end on a different lane than it started.
+  The trail curves from source to target via smoothstep with a target-lane
+  tip marker; pressing `slide_to` while the source is still held counts as
+  Perfect, releasing the source early during the transition is forgiven.
+  Auto-assigned on long holds: 25% on Hard, 45% on Expert. Existing beatmap
+  JSON is backward-compatible (`slide_to` defaults to `None`).
+- **Drain mode** — new Settings toggle. Health bleeds continuously at
+  5%/s; only Perfects meaningfully restore it (+3.5%), Greats barely
+  (+0.5%), Goods actively hurt (−1%). Automatically disabled in practice.
+- **Chromatic aberration** post-process on Perfect hits — a 6-frame R/B
+  channel split over the highway that punctuates clean timing without
+  distracting from the notes.
+- **Smarter note placement** — onsets are now classified as melodic vs
+  percussive. Lead notes on melodic onsets follow the spectral-centroid
+  contour so rising melodies drift right, falling drift left, while
+  drums keep the existing band-to-lane mapping.
+- **Batch import** — `cascade add <dir>` now recurses through a folder
+  and imports every supported audio file. Per-file failures are reported
+  inline and don't abort the run.
+- **Hold-release emulation** on terminals without the kitty keyboard
+  protocol. Uses OS key-repeat events plus a 550 ms initial grace and
+  120 ms repeat grace to synthesize a release; on macOS Terminal.app
+  where OS repeats arrive as plain Press events, a same-lane press
+  within 80 ms while a hold is active is treated as a refresh rather
+  than a new tap.
+
+### Changed
+
+- **Bottom HUD progress bar** is now a waveform preview: peak-amplitude
+  glyphs (`▁▂▃▄▅▆▇█`) at one column each, past portion lit and upcoming
+  dim, so the whole song shape is visible at a glance. Falls back to the
+  old dashed bar on very narrow terminals.
+- **`Note` type** gained a `slide_to: Option<u8>` field. Serialization is
+  `skip_serializing_if = "Option::is_none"` so old beatmaps stay pristine
+  on disk when regenerated.
+
 ## [0.6.1] — 2026-04-20
 
 ### Added
@@ -184,7 +224,8 @@ First public release.
   `cascade regen`, `cascade help`.
 - **Dual MIT / Apache-2.0 licensing**.
 
-[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/glebmatz/cascade/releases/tag/v0.7.0
 [0.6.1]: https://github.com/glebmatz/cascade/releases/tag/v0.6.1
 [0.6.0]: https://github.com/glebmatz/cascade/releases/tag/v0.6.0
 [0.5.0]: https://github.com/glebmatz/cascade/releases/tag/v0.5.0

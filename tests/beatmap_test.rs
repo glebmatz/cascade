@@ -19,21 +19,25 @@ fn test_beatmap_serialization_roundtrip() {
                 time_ms: 1000,
                 lane: 0,
                 duration_ms: 0,
+                slide_to: None,
             },
             Note {
                 time_ms: 1200,
                 lane: 2,
                 duration_ms: 500,
+                slide_to: None,
             },
             Note {
                 time_ms: 1200,
                 lane: 4,
                 duration_ms: 0,
+                slide_to: None,
             },
             Note {
                 time_ms: 1500,
                 lane: 1,
                 duration_ms: 0,
+                slide_to: None,
             },
         ],
     };

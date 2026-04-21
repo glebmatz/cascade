@@ -67,4 +67,9 @@ pub struct Note {
     /// Duration in ms for hold notes. 0 = tap note.
     #[serde(default)]
     pub duration_ms: u64,
+    /// For slide notes: the target lane the player must transition to before
+    /// the hold ends. `None` for plain taps and regular holds. Old beatmaps
+    /// without this field deserialise as `None` (backward-compatible).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slide_to: Option<u8>,
 }

@@ -97,3 +97,38 @@ fn test_game_state_grade_s_below_perfect() {
         grade
     );
 }
+
+#[test]
+fn drain_mode_bleeds_health_over_time() {
+    let mut state = GameState::new();
+    state.drain_mode = true;
+    let before = state.health;
+    state.tick_drain(2_000); // 2s
+    assert!(
+        state.health < before,
+        "drain should lower health, got {} -> {}",
+        before,
+        state.health
+    );
+}
+
+#[test]
+fn drain_mode_perfect_outpaces_drain() {
+    let mut state = GameState::new();
+    state.drain_mode = true;
+    state.health = 0.5;
+    state.register_judgement(Judgement::Perfect);
+    assert!(
+        state.health > 0.5,
+        "Perfect should raise health in drain mode, got {}",
+        state.health
+    );
+}
+
+#[test]
+fn drain_is_noop_when_disabled() {
+    let mut state = GameState::new();
+    let before = state.health;
+    state.tick_drain(10_000);
+    assert_eq!(state.health, before);
+}

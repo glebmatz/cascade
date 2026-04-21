@@ -55,12 +55,13 @@ hold-note release detection.
 
 ## Features
 
-- **Works with your library** — import any audio file, no curated song pack required; ID3/Vorbis tags are read automatically
-- **Smart beatmaps** — spectral-flux onset detection, autocorrelated BPM, downbeat phase alignment, per-difficulty density
-- **Chords + holds** — up to 3-note chords and sustained holds, tuned per difficulty
-- **Rich visuals** — half-block rendering, particle physics, starfield background, vignette, live spectrum bars, beat-synced receptor glow
+- **Works with your library** — import any audio file, or a whole folder recursively; ID3/Vorbis tags are read automatically
+- **Smart beatmaps** — spectral-flux onset detection, autocorrelated BPM, downbeat phase alignment, per-difficulty density, pitch-contour-aware lane placement for melodic onsets
+- **Chords + holds + slides** — up to 3-note chords, sustained holds, and slide notes that transition between lanes (Hard / Expert)
+- **Rich visuals** — half-block rendering, particle physics, starfield background, vignette, live spectrum bars, beat-synced receptor glow, chromatic-aberration flash on Perfect hits, waveform song-progress preview in the HUD
 - **Synthesized hit feedback** — every judgement has its own click; menu navigation has its own sound
 - **Modifiers** — Hidden, Flashlight, Sudden Death, Perfect Only. Each combo gets its own best-score slot
+- **Drain mode** — optional survival variant where health bleeds over time; only Perfects meaningfully restore it
 - **Practice mode** — loop any section at any speed from 0.25× to 2.0×, perfect for drilling that one run you keep bailing on
 - **Achievements** — 12 unlockables for combos, full clears, mod runs
 - **Stats dashboard** — aggregate play history with a 30-day accuracy sparkline and activity heatmap, both in the UI and via `cascade stats`
@@ -112,8 +113,10 @@ cargo build --release
 
 ```sh
 # 1. Import a song. ID3 tags are read automatically; beatmaps for all
-#    4 difficulties are generated.
+#    4 difficulties are generated. Pass a directory to batch-import every
+#    supported audio file under it.
 cascade add ~/Music/my-favorite-song.mp3
+cascade add ~/Music/                           # batch, recursive
 
 # 2. Check what's imported (with best scores per difficulty).
 cascade list
@@ -210,6 +213,8 @@ in-game Settings screen.
 scroll_speed = 1.0        # 0.5 – 2.0
 difficulty = "hard"
 health_enabled = true
+drain_mode = false        # continuous health drain; Perfects restore
+holds_enabled = true
 
 [keys]
 lanes = ["d", "f", " ", "j", "k"]
@@ -418,10 +423,10 @@ Good places to start:
 
 ## Roadmap
 
-- [ ] ID3/Vorbis/MP4 tag parsing at import (proper title/artist)
 - [ ] Online song sharing (upload beatmap JSON, not audio)
 - [ ] Multiplayer via terminal-to-terminal
 - [ ] Note editor for hand-tuning generated maps
+- [ ] Per-run hit-deviation histogram on the Results screen
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 

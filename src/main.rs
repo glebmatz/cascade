@@ -123,7 +123,7 @@ fn run_interactive(start_song: Option<StartSong>) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run(&mut terminal, start_song);
+    let result = run(&mut terminal, start_song, kb_enhanced);
 
     if kb_enhanced {
         let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
@@ -147,6 +147,10 @@ struct Session {
     achievements: AchievementStore,
     history_path: PathBuf,
     sfx: Option<SfxPlayer>,
+    /// Whether the terminal accepted kitty keyboard protocol flags. Gameplay
+    /// needs this to choose between native-release and emulated-release hold
+    /// detection.
+    kb_enhanced: bool,
 
     app: App,
     menu: MenuScreen,
@@ -163,7 +167,7 @@ struct Session {
 }
 
 impl Session {
-    fn load() -> Result<Self> {
+    fn load(kb_enhanced: bool) -> Result<Self> {
         let config = Config::load(&Config::default_path())?;
         // Register user-defined themes first so they show up in cycling and
         // can be resolved by slug, then apply the configured theme. Issues
@@ -202,6 +206,7 @@ impl Session {
             achievements,
             history_path,
             sfx,
+            kb_enhanced,
             app: App::new(),
             menu: MenuScreen::new(),
             song_select,
@@ -362,6 +367,8 @@ impl Session {
             self.config.audio.volume,
             self.config.gameplay.health_enabled,
             self.config.gameplay.holds_enabled,
+            self.config.gameplay.drain_mode,
+            self.kb_enhanced,
             mods,
             practice_config,
         )?;
@@ -374,8 +381,9 @@ impl Session {
 fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     start_song: Option<StartSong>,
+    kb_enhanced: bool,
 ) -> Result<()> {
-    let mut session = Session::load()?;
+    let mut session = Session::load(kb_enhanced)?;
 
     if let Some(start) = start_song {
         match session

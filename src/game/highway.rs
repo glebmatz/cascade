@@ -17,6 +17,8 @@ pub struct VisibleNote {
     pub end_position: f64,
     /// Duration in ms (0 = tap note)
     pub duration_ms: u64,
+    /// For slides: the target lane the trail ends on. `None` for plain taps/holds.
+    pub slide_to: Option<u8>,
     #[allow(dead_code)]
     pub hit: bool,
 }
@@ -68,6 +70,7 @@ impl Highway {
                 position,
                 end_position,
                 duration_ms: note.duration_ms,
+                slide_to: note.slide_to,
                 hit: false,
             });
         }

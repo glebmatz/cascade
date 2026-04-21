@@ -19,6 +19,9 @@ pub enum Action {
     MenuSelect,
     GameKey(usize),
     GameKeyRelease(usize),
+    /// Fired on OS key-repeat events. Used for hold-release emulation on
+    /// terminals that don't report release (non-kitty keyboard protocol).
+    GameKeyHeld(usize),
     Pause,
     #[allow(dead_code)]
     Back,

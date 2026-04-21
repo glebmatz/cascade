@@ -21,6 +21,17 @@ pub struct Onset {
     pub dominant_band: u8,
     pub band_fluxes: [f32; NUM_BANDS],
     pub frame_idx: usize,
+    /// Coarse melodic lane hint (0..=4), derived from the spectral centroid of
+    /// mid/high bands. Only meaningful when `melodic` is true; otherwise falls
+    /// back to the percussive lane mapping in [`pick_lane`].
+    pub pitch_lane: u8,
+    /// True when the onset's spectral flux is weighted toward mid/high bands —
+    /// i.e. a melodic event rather than a drum hit.
+    pub melodic: bool,
+    /// Centered ~1 s running mean of whitened band energies at this onset, in
+    /// `[0..=1]`. Drives density/chord/slide decisions so loud sections get
+    /// more notes than quiet ones regardless of their flux magnitude.
+    pub local_rms: f32,
 }
 
 pub fn generate_all_beatmaps(
@@ -61,16 +72,27 @@ pub fn compute_novelty(samples: &[f32], sample_rate: u32) -> Vec<NoveltyFrame> {
 
     let band_ranges = log_band_ranges(sample_rate);
 
+    // Prime `running_max` on the first ~3.5s so the intro doesn't ride a cold
+    // start (previously `running_max = 1e-3` caused the first 5–10 s to look
+    // abnormally novel). We replay these frames, discarding output.
     let mut band_running_max = [1e-3_f32; NUM_BANDS];
-    let mut prev_band_energy = [0.0_f32; NUM_BANDS];
     let mut buffer: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); FFT_SIZE];
-    let mut frames = Vec::with_capacity(samples.len() / HOP_SIZE);
-
+    const PRIME_FRAMES: usize = 300;
+    let prime_end_sample = (PRIME_FRAMES * HOP_SIZE).min(samples.len().saturating_sub(FFT_SIZE));
     let mut pos = 0;
+    while pos + FFT_SIZE <= samples.len() && pos < prime_end_sample {
+        fill_windowed(&mut buffer, samples, pos, &window);
+        fft.process(&mut buffer);
+        let _ = whitened_band_energy(&buffer, &band_ranges, &mut band_running_max);
+        pos += HOP_SIZE;
+    }
+
+    // Main pass.
+    let mut prev_band_energy = [0.0_f32; NUM_BANDS];
+    let mut frames = Vec::with_capacity(samples.len() / HOP_SIZE);
+    pos = 0;
     while pos + FFT_SIZE <= samples.len() {
-        for i in 0..FFT_SIZE {
-            buffer[i] = Complex::new(samples[pos + i] * window[i], 0.0);
-        }
+        fill_windowed(&mut buffer, samples, pos, &window);
         fft.process(&mut buffer);
 
         let band_energy = whitened_band_energy(&buffer, &band_ranges, &mut band_running_max);
@@ -88,6 +110,12 @@ pub fn compute_novelty(samples: &[f32], sample_rate: u32) -> Vec<NoveltyFrame> {
     }
 
     frames
+}
+
+fn fill_windowed(buffer: &mut [Complex<f32>], samples: &[f32], pos: usize, window: &[f32]) {
+    for i in 0..FFT_SIZE {
+        buffer[i] = Complex::new(samples[pos + i] * window[i], 0.0);
+    }
 }
 
 fn log_band_ranges(sample_rate: u32) -> [(usize, usize); NUM_BANDS] {
@@ -110,7 +138,10 @@ fn whitened_band_energy(
     band_ranges: &[(usize, usize); NUM_BANDS],
     running_max: &mut [f32; NUM_BANDS],
 ) -> [f32; NUM_BANDS] {
-    const DECAY: f32 = 0.98;
+    // Half-life ≈ 1.6 s. 0.98 (old) was too fast — long loud passages like
+    // choruses saturated running_max within ~400 ms and suppressed flux, so
+    // the system saw climactic sections as less novel than verses.
+    const DECAY: f32 = 0.995;
     let mut out = [0.0_f32; NUM_BANDS];
     for (b, &(lo, hi)) in band_ranges.iter().enumerate() {
         let sum: f32 = spectrum[lo..hi].iter().map(|c| (1.0 + c.norm()).ln()).sum();
@@ -146,6 +177,13 @@ pub fn pick_peaks(frames: &[NoveltyFrame], min_gap_ms: u64) -> Vec<Onset> {
         return Vec::new();
     }
 
+    // Centered ~1 s loudness envelope (mean of whitened band energies), then
+    // percentile-normalised across the whole song so `local_rms` spans a
+    // meaningful `[0..=1]` range — a track that never drops below ~0.85 raw
+    // still produces quiet verses near 0 and loud choruses near 1, which is
+    // what drives the density/chord/slide gating.
+    let local_rms = normalize_by_percentile(&compute_local_rms(frames));
+
     let mut sorted: Vec<f32> = frames.iter().map(|f| f.novelty).collect();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p95 = sorted[(sorted.len() as f32 * 0.95) as usize].max(1e-6);
@@ -164,16 +202,27 @@ pub fn pick_peaks(frames: &[NoveltyFrame], min_gap_ms: u64) -> Vec<Onset> {
         if !is_local_max(&novelty, i, W) {
             continue;
         }
-        if c < adaptive_threshold(&novelty, i, STATS_W) {
+        // Intensity-weighted threshold: quiet sections raise the bar (drop
+        // peaks), loud sections lower it (keep more peaks). This actually
+        // redistributes density — multiplying the novelty itself is
+        // self-cancelling because `adaptive_threshold` also rescales with it.
+        let rms = local_rms[i];
+        let thresh_mul = (1.5 - 0.9 * rms).clamp(0.7, 1.5);
+        let effective_thresh = adaptive_threshold(&novelty, i, STATS_W) * thresh_mul;
+        if c < effective_thresh {
             continue;
         }
 
+        let (pitch_lane, melodic) = classify_pitch(&frames[i].band_fluxes);
         let onset = Onset {
             time_ms: frames[i].time_ms as u64,
             strength: c,
             dominant_band: frames[i].dominant_band,
             band_fluxes: frames[i].band_fluxes,
             frame_idx: i,
+            pitch_lane,
+            melodic,
+            local_rms: local_rms[i],
         };
 
         if let Some(prev) = last_peak_ms
@@ -192,6 +241,55 @@ pub fn pick_peaks(frames: &[NoveltyFrame], min_gap_ms: u64) -> Vec<Onset> {
     }
 
     peaks
+}
+
+/// Map a raw envelope into `[0..=1]` by percentile: p10 → 0, p90 → 1. Makes a
+/// relatively flat loudness curve (e.g. a track that never drops below 0.85)
+/// still produce meaningful quiet/loud labels so downstream gating works.
+fn normalize_by_percentile(values: &[f32]) -> Vec<f32> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let lo = sorted[sorted.len() / 10];
+    let hi = sorted[sorted.len() * 9 / 10];
+    let range = (hi - lo).max(1e-3);
+    values
+        .iter()
+        .map(|&v| ((v - lo) / range).clamp(0.0, 1.0))
+        .collect()
+}
+
+/// Centered ~1 s running mean of per-frame mean whitened band energy. Output
+/// is in `[0..=1]` — same range as `band_energy`. Falls back to zero-padded
+/// windows at the edges.
+fn compute_local_rms(frames: &[NoveltyFrame]) -> Vec<f32> {
+    const HALF_W: usize = 43; // 43 * 11.6ms ≈ 500ms → ~1s window
+    let n = frames.len();
+    let mut out = vec![0.0_f32; n];
+    if n == 0 {
+        return out;
+    }
+    // Per-frame mean across bands, then smooth with a box filter.
+    let frame_mean: Vec<f32> = frames
+        .iter()
+        .map(|f| f.band_energy.iter().sum::<f32>() / NUM_BANDS as f32)
+        .collect();
+    // Prefix sum for O(n) box filter.
+    let mut prefix = Vec::with_capacity(n + 1);
+    prefix.push(0.0_f32);
+    for &v in &frame_mean {
+        prefix.push(prefix.last().unwrap() + v);
+    }
+    for i in 0..n {
+        let lo = i.saturating_sub(HALF_W);
+        let hi = (i + HALF_W + 1).min(n);
+        let sum = prefix[hi] - prefix[lo];
+        let cnt = (hi - lo) as f32;
+        out[i] = sum / cnt.max(1.0);
+    }
+    out
 }
 
 fn is_local_max(novelty: &[f32], i: usize, half_window: usize) -> bool {
@@ -305,28 +403,63 @@ pub fn place_notes(
     let mut lane_history: Vec<u8> = Vec::with_capacity(16);
 
     for onset in &filtered {
-        if !notes.is_empty() && onset.time_ms.saturating_sub(last_time) < params.min_gap_ms {
+        // Dynamic min-gap: loud passages compress the gap so climaxes reach
+        // their musical density; quiet passages stretch it. Range [0.8, 1.3]
+        // — narrow enough that total density doesn't balloon while still
+        // giving choruses ~40% more note capacity than verses.
+        let gap_factor = (1.25 - 0.45 * onset.local_rms).clamp(0.8, 1.3);
+        let effective_gap = (params.min_gap_ms as f32 * gap_factor) as u64;
+
+        if !notes.is_empty() && onset.time_ms.saturating_sub(last_time) < effective_gap {
             continue;
         }
         let quantized = quantize_phased(onset.time_ms, phase_ms, grid_ms);
-        if !notes.is_empty() && quantized.saturating_sub(last_time) < params.min_gap_ms / 2 {
+        if !notes.is_empty() && quantized.saturating_sub(last_time) < effective_gap / 2 {
             continue;
         }
 
         let seed = hash_u64(quantized ^ ((onset.dominant_band as u64) << 32) ^ (difficulty as u64));
 
-        let chord_bands = pick_chord_bands(onset, params.chord_prob, params.max_chord_notes, seed);
+        // Chord probability scales with local intensity. Range [0.3, 1.0] —
+        // we never go above the difficulty's base rate (avoids 60%+ chord
+        // walls in loud sections), but quiet pre-choruses drop to 30%.
+        let intensity_factor = (0.3 + 0.7 * onset.local_rms).clamp(0.3, 1.0);
+        let chord_prob_eff = (params.chord_prob * intensity_factor as f64).min(0.8);
+
+        let chord_bands = pick_chord_bands(onset, chord_prob_eff, params.max_chord_notes, seed);
         let duration_ms = detect_hold(onset, frames, hop_ms, beat_ms, phase_ms, grid_ms, quantized);
+        let slide_to = pick_slide_target(
+            onset,
+            duration_ms,
+            beat_ms,
+            difficulty,
+            seed.wrapping_add(17),
+        );
 
         let mut used_lanes: Vec<u8> = Vec::with_capacity(chord_bands.len());
         for (ci, &band) in chord_bands.iter().enumerate() {
             let sub_seed = seed.wrapping_add(ci as u64 * 31);
-            let lane = pick_lane(band, &lane_history, &used_lanes, sub_seed);
+            // Only the lead (first) note of a melodic onset follows the pitch
+            // contour; chord companions still use the percussive mapping so
+            // they fan out visually rather than pile up near the lead.
+            let hint = if ci == 0 && onset.melodic {
+                Some(onset.pitch_lane)
+            } else {
+                None
+            };
+            let lane = pick_lane(band, &lane_history, &used_lanes, sub_seed, hint);
             used_lanes.push(lane);
+            // Slide only attaches to the lead (hold-bearing) note.
+            let note_slide = if ci == 0 && duration_ms > 0 {
+                slide_to.filter(|&t| t != lane)
+            } else {
+                None
+            };
             notes.push(Note {
                 time_ms: quantized,
                 lane,
                 duration_ms: if ci == 0 { duration_ms } else { 0 },
+                slide_to: note_slide,
             });
             lane_history.push(lane);
             if lane_history.len() > 10 {
@@ -337,6 +470,60 @@ pub fn place_notes(
     }
 
     notes
+}
+
+/// Decide whether to turn a hold into a slide and, if so, pick the target
+/// lane. Slide probability scales with `local_rms` so finger transitions
+/// cluster on climactic moments rather than sleepy verses.
+fn pick_slide_target(
+    onset: &Onset,
+    duration_ms: u64,
+    beat_ms: f64,
+    difficulty: Difficulty,
+    seed: u64,
+) -> Option<u8> {
+    let base_prob = match difficulty {
+        Difficulty::Easy | Difficulty::Medium => 0.0,
+        Difficulty::Hard => 0.20,
+        Difficulty::Expert => 0.35,
+    };
+    if base_prob <= 0.0 {
+        return None;
+    }
+    let min_duration_ms = (beat_ms * 1.5) as u64;
+    if duration_ms < min_duration_ms {
+        return None;
+    }
+    // Intensity gate: slides strongly favour climactic moments. Factor in
+    // [0.2, 1.0] — base is the max, so Hard caps at 20% and Expert at 35%
+    // slide-probability among long holds.
+    let intensity_factor = (0.2 + 0.8 * onset.local_rms).clamp(0.2, 1.0) as f64;
+    let effective_prob = base_prob * intensity_factor;
+    let roll = hash_f64(seed);
+    if roll >= effective_prob {
+        return None;
+    }
+
+    // Use the pitch lane as source anchor so slide direction matches the
+    // melodic contour when the onset is melodic.
+    let anchor = if onset.melodic {
+        onset.pitch_lane as i32
+    } else {
+        band_to_lane(onset.dominant_band) as i32
+    };
+    // Bias toward ±1; longer holds occasionally jump ±2.
+    let step = if duration_ms > (beat_ms * 3.0) as u64 && roll < effective_prob * 0.3 {
+        2
+    } else {
+        1
+    };
+    let dir = if (seed & 1) == 0 { 1 } else { -1 };
+    let mut target = anchor + dir * step;
+    if !(0..=4).contains(&target) {
+        target = anchor - dir * step;
+    }
+    let target = target.clamp(0, 4) as u8;
+    Some(target)
 }
 
 struct DifficultyParams {
@@ -494,20 +681,52 @@ fn band_to_lane(band: u8) -> u8 {
     }
 }
 
-fn pick_lane(band: u8, history: &[u8], forbidden: &[u8], seed: u64) -> u8 {
+/// Classify an onset's spectral flux into (pitch_lane, melodic). The pitch lane
+/// is the spectral centroid over bands 2..8, linearly remapped onto 5 lanes;
+/// `melodic` is true when mid/high-band flux dominates the low bands, i.e.
+/// this is a tonal event rather than a kick or snare.
+fn classify_pitch(fluxes: &[f32; NUM_BANDS]) -> (u8, bool) {
+    let low: f32 = fluxes[0] + fluxes[1];
+    let high: f32 = fluxes[2..NUM_BANDS].iter().sum();
+    let total = (low + high).max(1e-6);
+    let melodic = high > low * 1.2 && high / total > 0.55;
+
+    // Weighted centroid over bands 2..8 mapped to 0..=4.
+    let mut sum = 0.0_f32;
+    let mut wsum = 0.0_f32;
+    for (b, &flux) in fluxes.iter().enumerate().skip(2) {
+        sum += (b as f32) * flux;
+        wsum += flux;
+    }
+    let centroid = if wsum > 1e-6 { sum / wsum } else { 4.0 };
+    // Bands 2..=7 → lanes 0..=4 linearly.
+    let pitch_lane = (((centroid - 2.0) / 5.0) * 4.0).round().clamp(0.0, 4.0) as u8;
+    (pitch_lane, melodic)
+}
+
+fn pick_lane(band: u8, history: &[u8], forbidden: &[u8], seed: u64, hint: Option<u8>) -> u8 {
     let base = band_to_lane(band);
-    let mut candidates: Vec<u8> = match base {
-        0 => vec![0, 1],
-        1 => vec![0, 1, 2],
-        2 => vec![1, 2, 3],
-        3 => vec![2, 3, 4],
-        _ => vec![3, 4],
+    // Melodic hint: pick lanes near the spectral centroid so a rising melody
+    // drifts right, falling drifts left. Candidate window widens to ±1 so the
+    // anti-repeat heuristic still has options.
+    let mut candidates: Vec<u8> = if let Some(h) = hint {
+        let lo = h.saturating_sub(1);
+        let hi = (h + 1).min(4);
+        (lo..=hi).collect()
+    } else {
+        match base {
+            0 => vec![0, 1],
+            1 => vec![0, 1, 2],
+            2 => vec![1, 2, 3],
+            3 => vec![2, 3, 4],
+            _ => vec![3, 4],
+        }
     };
     candidates.retain(|c| !forbidden.contains(c));
     if candidates.is_empty() {
         candidates = (0..5u8).filter(|c| !forbidden.contains(c)).collect();
         if candidates.is_empty() {
-            return base;
+            return hint.unwrap_or(base);
         }
     }
 

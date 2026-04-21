@@ -18,6 +18,10 @@ pub struct GameplayConfig {
     pub health_enabled: bool,
     #[serde(default = "default_true")]
     pub holds_enabled: bool,
+    /// Drain mode: health continuously falls while playing. Only Perfects
+    /// restore it. Implies `health_enabled`. Off by default.
+    #[serde(default)]
+    pub drain_mode: bool,
 }
 
 fn default_true() -> bool {
@@ -54,6 +58,7 @@ impl Default for Config {
                 difficulty: "hard".to_string(),
                 health_enabled: true,
                 holds_enabled: true,
+                drain_mode: false,
             },
             keys: KeysConfig {
                 lanes: ['d', 'f', ' ', 'j', 'k'],

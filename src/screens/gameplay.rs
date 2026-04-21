@@ -26,6 +26,7 @@ const LANE_BURST_FRAMES: u8 = 8;
 const SHAKE_FRAMES_ON_MISS: u8 = 6;
 const HOLD_RELEASE_GRACE_MS: u64 = 50;
 const STAR_COUNT: usize = 40;
+const ABERRATION_FRAMES_ON_PERFECT: u8 = 6;
 
 const COMBO_MILESTONES: &[(u32, &str)] = &[
     (25, "NICE!"),
@@ -67,6 +68,24 @@ pub struct GameplayScreen {
     pub milestone: Option<MilestoneSplash>,
     pub last_milestone: u32,
     pub mods: Mods,
+    /// Last track-time position used by `tick_drain`. Only meaningful in drain mode.
+    pub last_drain_tick_ms: u64,
+    /// Remaining frames for the chromatic-aberration flash on Perfect hits.
+    pub aberration_frames: u8,
+    /// Pre-downsampled waveform (one peak-amplitude value per bucket, 0..=1).
+    /// Empty when the song is too short to bother. Resampled per-frame to
+    /// terminal width inside the widget.
+    pub waveform: Vec<f32>,
+    /// Whether the terminal reports key release events natively (kitty keyboard
+    /// protocol). When false, the game falls back to OS key-repeat based
+    /// emulation of hold releases.
+    pub kb_enhanced: bool,
+    /// Per-lane timestamp of the last press/repeat event seen. Used by hold
+    /// release emulation only.
+    pub hold_last_seen_ms: [u64; 5],
+    /// Per-lane timestamp of the initial press for the current hold. Used to
+    /// wait out the OS key-repeat initial delay before declaring a release.
+    pub hold_pressed_at_ms: [u64; 5],
     /// When set, the run is a practice loop: gameplay loops the section, score
     /// and achievements are not recorded, and `mods` are expected to be empty.
     pub practice: Option<PracticeConfig>,
@@ -95,6 +114,8 @@ impl GameplayScreen {
         volume: f64,
         health_enabled: bool,
         holds_enabled: bool,
+        drain_mode: bool,
+        kb_enhanced: bool,
         mods: Mods,
         practice: Option<PracticeConfig>,
     ) -> Result<Self> {
@@ -113,10 +134,17 @@ impl GameplayScreen {
         let speed = practice.as_ref().map(|p| p.speed).unwrap_or(1.0);
         let practice_label = practice.as_ref().map(|p| p.badge());
 
+        // Drain implies health on. Practice disables drain: it's a learning mode.
+        let drain_active = drain_mode && health_enabled && practice.is_none();
+        let mut state = GameState::new();
+        state.drain_mode = drain_active;
+
+        let waveform = downsample_waveform(&samples, 512);
+
         Ok(Self {
             highway: Highway::new(scroll_speed),
             judge: HitJudge::new(offset_ms),
-            state: GameState::new(),
+            state,
             hit_notes,
             held_notes: vec![None; 5],
             hit_flash: [0; 5],
@@ -140,6 +168,12 @@ impl GameplayScreen {
             milestone: None,
             last_milestone: 0,
             mods,
+            last_drain_tick_ms: 0,
+            aberration_frames: 0,
+            waveform,
+            kb_enhanced,
+            hold_last_seen_ms: [0; 5],
+            hold_pressed_at_ms: [0; 5],
             practice,
             practice_label,
             speed,
@@ -197,11 +231,54 @@ impl GameplayScreen {
         );
 
         self.process_auto_events(current_ms);
+        self.emulate_hold_releases(current_ms);
         self.tick_visual_timers();
         self.advance_stars();
         self.advance_particles();
         self.update_spectrum(current_ms);
+        self.tick_drain(current_ms);
         self.check_finish_conditions(current_ms);
+    }
+
+    /// On terminals that don't report key release events, we infer releases from
+    /// the absence of OS key-repeat events. A repeat stream starts after the
+    /// initial OS delay (~300–500ms), so we wait that out before declaring any
+    /// release; after that, two repeat-intervals of silence counts as a release.
+    fn emulate_hold_releases(&mut self, current_ms: u64) {
+        if self.kb_enhanced {
+            return;
+        }
+        const INITIAL_GRACE_MS: u64 = 550;
+        const REPEAT_GRACE_MS: u64 = 120;
+        for lane in 0..5 {
+            if self.held_notes[lane].is_none() {
+                continue;
+            }
+            let since_press = current_ms.saturating_sub(self.hold_pressed_at_ms[lane]);
+            let since_refresh = current_ms.saturating_sub(self.hold_last_seen_ms[lane]);
+            if since_press > INITIAL_GRACE_MS && since_refresh > REPEAT_GRACE_MS {
+                self.handle_key_release(lane);
+            }
+        }
+    }
+
+    /// Advance continuous health drain if drain mode is on. Uses track-time
+    /// deltas so slowing with practice doesn't cheat drain (though drain is
+    /// disabled in practice anyway).
+    fn tick_drain(&mut self, current_ms: u64) {
+        if !self.state.drain_mode {
+            return;
+        }
+        if self.last_drain_tick_ms == 0 {
+            self.last_drain_tick_ms = current_ms;
+            return;
+        }
+        let dt = current_ms.saturating_sub(self.last_drain_tick_ms);
+        if dt == 0 {
+            return;
+        }
+        self.state.tick_drain(dt);
+        self.last_drain_tick_ms = current_ms;
     }
 
     fn reset_practice_loop(&mut self) {
@@ -211,7 +288,10 @@ impl GameplayScreen {
         let wallclock = p.section_start_wallclock_ms();
         let _ = self.audio.seek_to_ms(wallclock);
 
+        // Practice disables drain, but we still reset the timer so re-entry is
+        // clean if practice is ever removed.
         self.state = GameState::new();
+        self.last_drain_tick_ms = 0;
         for flag in &mut self.hit_notes {
             *flag = false;
         }
@@ -223,6 +303,7 @@ impl GameplayScreen {
         self.judgement_timer = 0;
         self.judgement_elapsed = 0;
         self.shake_frames = 0;
+        self.aberration_frames = 0;
         self.milestone = None;
         self.last_milestone = 0;
         self.particles.clear();
@@ -243,7 +324,29 @@ impl GameplayScreen {
                 None
             }
             Action::GameKey(lane) if !self.paused && !self.finished => {
-                self.handle_key_press(lane);
+                let now = self.position_ms_in_track();
+                let prev_seen = self.hold_last_seen_ms[lane];
+                self.hold_last_seen_ms[lane] = now;
+                // On terminals that don't report Repeat events (e.g. macOS
+                // Terminal.app), OS auto-repeat arrives as a stream of Press
+                // events. While a hold is already active on this lane, ignore
+                // Press events that land within the OS repeat window so they
+                // can't accidentally auto-hit the next note.
+                let is_repeat_like = !self.kb_enhanced
+                    && self.held_notes[lane].is_some()
+                    && now.saturating_sub(prev_seen) < 80;
+                if !is_repeat_like {
+                    self.hold_pressed_at_ms[lane] = now;
+                    self.handle_key_press(lane);
+                }
+                None
+            }
+            Action::GameKeyHeld(lane) if !self.paused && !self.finished => {
+                // Repeat event — refresh "still held" timer for hold emulation.
+                // Ignored on terminals that report real release events.
+                if !self.kb_enhanced {
+                    self.hold_last_seen_ms[lane] = self.position_ms_in_track();
+                }
                 None
             }
             Action::GameKeyRelease(lane) if !self.paused && !self.finished => {
@@ -284,6 +387,11 @@ impl GameplayScreen {
         }
         .render(top_area, buf);
 
+        let aberration = if self.aberration_frames > 0 {
+            self.aberration_frames as f32 / ABERRATION_FRAMES_ON_PERFECT as f32 * 0.7
+        } else {
+            0.0
+        };
         HighwayWidget::new(&self.highway.visible_notes)
             .with_hit_flash(self.hit_flash)
             .with_lane_burst(self.lane_burst)
@@ -300,6 +408,7 @@ impl GameplayScreen {
             .with_combo(self.state.combo)
             .with_timing(self.position_ms_in_track(), 2000.0 / self.scroll_speed)
             .with_mods(self.mods.clone())
+            .with_aberration(aberration)
             .render(mid_area, buf);
 
         self.draw_milestone_splash(buf, area);
@@ -322,6 +431,7 @@ impl GameplayScreen {
             progress,
             difficulty: &self.beatmap.difficulty.to_string().to_uppercase(),
             total_notes: self.beatmap.notes.len() as u32,
+            waveform: &self.waveform,
         }
         .render(bot_area, buf);
 
@@ -345,14 +455,31 @@ impl GameplayScreen {
             if self.hit_notes[i] {
                 continue;
             }
-            let lane = note.lane as usize;
             if note.duration_ms > 0 {
-                if self.held_notes[lane] == Some(i) {
-                    if current_ms >= note.time_ms + note.duration_ms {
-                        events.push(AutoEvent::HoldComplete(i, lane));
+                // Is this note held on any lane? For ordinary holds it'll be
+                // on its source lane; during a slide the source slot is kept
+                // filled even after finger release, so the check is identical.
+                let held_on: Option<usize> = (0..5).find(|&l| self.held_notes[l] == Some(i));
+                match (note.slide_to, held_on) {
+                    (Some(_), Some(src)) => {
+                        // Slide in progress: don't auto-complete. Miss only
+                        // when the hold's end has passed without a slide_to press.
+                        if current_ms > note.time_ms + note.duration_ms + HitJudge::MISS_MS {
+                            events.push(AutoEvent::Miss(i));
+                            // Clear the slot so we don't re-enter this branch.
+                            self.held_notes[src] = None;
+                        }
                     }
-                } else if self.judge.is_expired(note.time_ms, current_ms) {
-                    events.push(AutoEvent::Miss(i));
+                    (None, Some(src)) => {
+                        if current_ms >= note.time_ms + note.duration_ms {
+                            events.push(AutoEvent::HoldComplete(i, src));
+                        }
+                    }
+                    (_, None) => {
+                        if self.judge.is_expired(note.time_ms, current_ms) {
+                            events.push(AutoEvent::Miss(i));
+                        }
+                    }
                 }
             } else if self.judge.is_expired(note.time_ms, current_ms) {
                 events.push(AutoEvent::Miss(i));
@@ -369,6 +496,7 @@ impl GameplayScreen {
     fn complete_hold(&mut self, idx: usize, lane: usize) {
         self.hit_notes[idx] = true;
         self.held_notes[lane] = None;
+        self.aberration_frames = ABERRATION_FRAMES_ON_PERFECT;
         self.register_judgement(Judgement::Perfect, lane);
         self.check_milestone();
     }
@@ -398,6 +526,9 @@ impl GameplayScreen {
         if judgement != Judgement::Miss {
             self.lane_burst[lane] = LANE_BURST_FRAMES;
         }
+        if judgement == Judgement::Perfect {
+            self.aberration_frames = ABERRATION_FRAMES_ON_PERFECT;
+        }
         if judgement == Judgement::Miss {
             self.shake_frames = SHAKE_FRAMES_ON_MISS;
             if self.mods.contains(Modifier::SuddenDeath) {
@@ -422,6 +553,13 @@ impl GameplayScreen {
     fn handle_key_press(&mut self, lane: usize) {
         self.hit_flash[lane] = HIT_FLASH_FRAMES;
         let current_ms = self.position_ms_in_track();
+
+        // Slide completion takes priority over regular hit detection: pressing
+        // the slide target while its source hold is still active completes the
+        // slide for a Perfect.
+        if self.try_slide_complete(lane, current_ms) {
+            return;
+        }
 
         let best = self.find_closest_note(lane, current_ms);
         let Some((note_idx, _)) = best else { return };
@@ -456,11 +594,56 @@ impl GameplayScreen {
             return;
         };
         let note = &self.beatmap.notes[idx];
+        // Slides: early release from the source lane is expected during finger
+        // transition. Put the note back into the slot so the follow-up press
+        // on `slide_to` can still find it; miss is decided only at the end of
+        // the hold (enforced in process_auto_events).
+        if note.slide_to.is_some() {
+            self.held_notes[lane] = Some(idx);
+            return;
+        }
         let note_end = note.time_ms + note.duration_ms;
         let current_ms = self.position_ms_in_track();
         if current_ms + HOLD_RELEASE_GRACE_MS < note_end {
             self.register_miss(idx);
         }
+    }
+
+    /// Pressing the `slide_to` lane while its source hold is in progress
+    /// completes the slide instantly: the lead note has been held through the
+    /// required transition. Returns true when the press consumed an active
+    /// slide so the caller skips regular hit detection.
+    fn try_slide_complete(&mut self, lane: usize, current_ms: u64) -> bool {
+        for src in 0..5 {
+            let Some(idx) = self.held_notes[src] else {
+                continue;
+            };
+            let note = &self.beatmap.notes[idx];
+            let Some(target) = note.slide_to else {
+                continue;
+            };
+            if target as usize != lane {
+                continue;
+            }
+            // Slide press is valid from the moment the hold starts through a
+            // small grace past its end — missing slides leak to process_auto_events.
+            let valid_until = note.time_ms + note.duration_ms + HitJudge::MISS_MS;
+            if current_ms < note.time_ms || current_ms > valid_until {
+                continue;
+            }
+            self.hit_notes[idx] = true;
+            self.held_notes[src] = None;
+            self.held_notes[lane] = None;
+            self.lane_burst[lane] = LANE_BURST_FRAMES;
+            self.aberration_frames = ABERRATION_FRAMES_ON_PERFECT;
+            self.register_judgement(Judgement::Perfect, lane);
+            self.check_milestone();
+            if let Some(area) = self.last_render_area {
+                self.spawn_hit_particles(lane, Judgement::Perfect, area);
+            }
+            return true;
+        }
+        false
     }
 
     fn find_closest_note(&self, lane: usize, current_ms: u64) -> Option<(usize, u64)> {
@@ -469,7 +652,10 @@ impl GameplayScreen {
             if self.hit_notes[i] || note.lane as usize != lane {
                 continue;
             }
-            if self.held_notes[lane] == Some(i) {
+            // Skip a note that's already held on any lane — covers both plain
+            // holds and slides where the source slot stays filled through the
+            // transition.
+            if (0..5).any(|l| self.held_notes[l] == Some(i)) {
                 continue;
             }
             let diff = (note.time_ms as i64 - current_ms as i64).unsigned_abs();
@@ -497,6 +683,9 @@ impl GameplayScreen {
         }
         if self.shake_frames > 0 {
             self.shake_frames -= 1;
+        }
+        if self.aberration_frames > 0 {
+            self.aberration_frames -= 1;
         }
         if let Some(m) = self.milestone.as_mut() {
             m.timer = m.timer.saturating_sub(1);
@@ -699,6 +888,41 @@ fn draw_pause_overlay(buf: &mut Buffer, area: Rect) {
         hint,
         Style::default().fg(Color::Rgb(100, 100, 100)),
     );
+}
+
+/// Downsample raw samples into `buckets` peak-amplitude entries in `[0..=1]`.
+/// Each bucket is the max |sample| over its source range, renormalised by the
+/// global peak so quiet tracks still fill the highway. Returns empty if the
+/// input is shorter than `buckets`.
+fn downsample_waveform(samples: &[f32], buckets: usize) -> Vec<f32> {
+    if samples.len() < buckets || buckets == 0 {
+        return Vec::new();
+    }
+    let mut out = vec![0.0_f32; buckets];
+    let mut peak = 0.0_f32;
+    let step = samples.len() as f32 / buckets as f32;
+    for (i, slot) in out.iter_mut().enumerate() {
+        let start = (i as f32 * step) as usize;
+        let end = (((i + 1) as f32) * step) as usize;
+        let end = end.min(samples.len()).max(start + 1);
+        let mut local_peak = 0.0_f32;
+        for &s in &samples[start..end] {
+            let a = s.abs();
+            if a > local_peak {
+                local_peak = a;
+            }
+        }
+        *slot = local_peak;
+        if local_peak > peak {
+            peak = local_peak;
+        }
+    }
+    if peak > 1e-6 {
+        for v in &mut out {
+            *v = (*v / peak).clamp(0.0, 1.0);
+        }
+    }
+    out
 }
 
 fn init_stars() -> Vec<Star> {
