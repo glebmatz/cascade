@@ -13,6 +13,7 @@ mod input;
 mod play_history;
 mod score_store;
 mod screens;
+mod share;
 mod stats;
 mod ui;
 
@@ -54,9 +55,25 @@ fn main() -> Result<()> {
 
     if args.len() >= 2 {
         match args[1].as_str() {
-            "add" if args.len() >= 3 => return cli::add(&args[2]),
+            "add" if args.len() >= 3 => {
+                let source_url = cli::extract_flag(&args[3..], "--source-url");
+                return cli::add(&args[2], source_url.as_deref());
+            }
             "list" | "ls" => return cli::list(),
             "song" if args.len() >= 3 => return cli::song(&args[2]),
+            "export" if args.len() >= 3 => {
+                let slug = &args[2];
+                let output = cli::extract_flag(&args[3..], "-o")
+                    .or_else(|| cli::extract_flag(&args[3..], "--output"))
+                    .map(PathBuf::from);
+                let source_url = cli::extract_flag(&args[3..], "--source-url");
+                return cli::export(slug, output.as_deref(), source_url.as_deref());
+            }
+            "import" if args.len() >= 3 => {
+                let file = PathBuf::from(&args[2]);
+                let fetch = !args[3..].iter().any(|a| a == "--no-fetch");
+                return cli::import_pkg(&file, fetch);
+            }
             "achievements" => return cli::achievements_list(),
             "stats" => return cli::stats(),
             "themes" => return cli::themes(),

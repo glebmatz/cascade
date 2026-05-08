@@ -14,5 +14,6 @@ pub mod input;
 pub mod play_history;
 pub mod score_store;
 pub mod screens;
+pub mod share;
 pub mod stats;
 pub mod ui;

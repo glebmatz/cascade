@@ -421,9 +421,43 @@ Good places to start:
   generator is self-contained in `src/beatmap/generator.rs`
 - Extra terminals validated and added to the compatibility table
 
+## Sharing beatmaps (`.cscd`)
+
+Cascade does not bundle audio — but you can share the **beatmaps + metadata**
+plus a download link to the original file. The recipient ends up with a
+fully playable song after one command:
+
+```sh
+# Author side. The URL is remembered in metadata.json so you only set it once.
+cascade add ~/Music/song.mp3 --source-url https://example.com/song.mp3
+
+# Pack everything (metadata + 4 beatmaps + sha256 of the audio) into one file.
+cascade export my-song -o my-song.cscd
+
+# Recipient side. Audio is fetched from the URL and hash-verified.
+cascade import my-song.cscd
+```
+
+If the package has no `source_url`, `cascade import` still installs the
+beatmaps and tells you which audio filename to drop into the song folder
+manually. If a `source_url` is present but the SHA-256 doesn't match, the
+downloaded file is renamed to `audio.mp3.mismatch` and the import fails
+loudly — beatmap timings are derived from the original file, so a different
+encoding will misalign every note.
+
+You can also import directly from a URL without packing:
+
+```sh
+cascade add https://example.com/song.mp3
+```
+
+Cascade itself does not host any audio. Use this with files you have the
+right to redistribute (your own work, public-domain tracks, Creative
+Commons, etc.).
+
 ## Roadmap
 
-- [ ] Online song sharing (upload beatmap JSON, not audio)
+- [x] Online song sharing (upload beatmap JSON, not audio)
 - [ ] Multiplayer via terminal-to-terminal
 - [ ] Note editor for hand-tuning generated maps
 - [ ] Per-run hit-deviation histogram on the Results screen

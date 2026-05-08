@@ -11,6 +11,7 @@ use crate::play_history::{self, PlayHistory};
 use crate::score_store::ScoreStore;
 use crate::score_store::decompose_key;
 use crate::screens::song_select::find_audio_file;
+use crate::share::{self, AudioStatus};
 use crate::stats::{self, DiffRow, StatsSummary, TopSong};
 use crate::ui::theme;
 
@@ -105,7 +106,8 @@ pub fn print_help() -> Result<()> {
         "Cascade — terminal rhythm game\n\n\
          Usage:\n  \
          cascade                         Launch the interactive UI\n  \
-         cascade add <path>              Import an audio file — or a whole folder, recursively\n  \
+         cascade add <path-or-url>       Import an audio file, a directory (recursive), or a URL\n                                  \
+         --source-url <URL>      record an origin URL for a local file\n  \
          cascade list                    List all imported songs with best scores\n  \
          cascade song <slug>             Show detailed stats for one song (all mods/diffs)\n  \
          cascade play <slug> [--diff] [--mods CODES] [--section RANGE] [--speed N]\n                                  \
@@ -115,6 +117,10 @@ pub fn print_help() -> Result<()> {
          --section MM:SS-MM:SS  practice: loop a section\n                                  \
          --speed 0.25..2.0      practice: slow down / speed up\n                                  \
          (practice ignores mods and does not save scores)\n  \
+         cascade export <slug> [-o FILE.cscd] [--source-url URL]\n                                  \
+         Pack metadata + all beatmaps into a .cscd share file\n  \
+         cascade import <file.cscd> [--no-fetch]\n                                  \
+         Install a share package; auto-downloads audio if URL is recorded\n  \
          cascade achievements            List all achievements with unlock status\n  \
          cascade stats                   Show aggregate play statistics\n  \
          cascade themes                  List built-in + user themes, validate files\n  \
@@ -126,17 +132,29 @@ pub fn print_help() -> Result<()> {
     Ok(())
 }
 
-pub fn add(path_str: &str) -> Result<()> {
-    let path = PathBuf::from(path_str);
+pub fn add(target: &str, source_url: Option<&str>) -> Result<()> {
     let songs_dir = Config::cascade_dir().join("songs");
     std::fs::create_dir_all(&songs_dir)?;
 
+    if share::looks_like_url(target) {
+        if source_url.is_some() {
+            anyhow::bail!(
+                "--source-url is for local files; the URL is already supplied positionally"
+            );
+        }
+        return add_from_url(target, &songs_dir);
+    }
+
+    let path = PathBuf::from(target);
     if path.is_dir() {
+        if source_url.is_some() {
+            anyhow::bail!("--source-url cannot be combined with a directory import");
+        }
         return add_batch(&path, &songs_dir);
     }
 
     println!("Importing {}...", path.display());
-    let song = import::import_local_file(&path, &songs_dir)?;
+    let song = import::import_local_file_with_source(&path, &songs_dir, source_url)?;
 
     let display = if song.artist.is_empty() {
         song.title.clone()
@@ -146,6 +164,26 @@ pub fn add(path_str: &str) -> Result<()> {
     println!("Generating beatmaps for {}...", display);
     regenerate_for_dir(&song.dir, &song.audio_path, &song.title, &song.artist)?;
 
+    println!("Successfully imported: {}", display);
+    Ok(())
+}
+
+fn add_from_url(url: &str, songs_dir: &Path) -> Result<()> {
+    let tmp_dir = tempfile::tempdir()?;
+    let ext = share::ext_from_url(url);
+    let tmp_path = tmp_dir.path().join(format!("download.{ext}"));
+    println!("Downloading {url}...");
+    let bytes = share::download_to_file(url, &tmp_path)?;
+    println!("  fetched {} bytes", bytes);
+
+    let song = import::import_local_file_with_source(&tmp_path, songs_dir, Some(url))?;
+    let display = if song.artist.is_empty() {
+        song.title.clone()
+    } else {
+        format!("{} — {}", song.artist, song.title)
+    };
+    println!("Generating beatmaps for {}...", display);
+    regenerate_for_dir(&song.dir, &song.audio_path, &song.title, &song.artist)?;
     println!("Successfully imported: {}", display);
     Ok(())
 }
@@ -220,6 +258,120 @@ fn collect_audio_files(dir: &Path, exts: &[&str], out: &mut Vec<PathBuf>) -> Res
             out.push(p);
         }
     }
+    Ok(())
+}
+
+pub fn export(slug: &str, output_path: Option<&Path>, source_url: Option<&str>) -> Result<()> {
+    let song_dir = Config::cascade_dir().join("songs").join(slug);
+    if !song_dir.is_dir() {
+        anyhow::bail!(
+            "Song '{}' not found. Use `cascade list` to see imported songs.",
+            slug
+        );
+    }
+
+    if let Some(url) = source_url {
+        stamp_source_url(&song_dir, url)?;
+    }
+
+    let pkg = share::build_from_dir(&song_dir)?;
+    let default_path = PathBuf::from(format!("{}.cscd", slug));
+    let out = output_path.unwrap_or(&default_path);
+    share::save_package(&pkg, out)?;
+
+    let url_note = pkg
+        .song
+        .source_url
+        .as_deref()
+        .map(|u| format!(" (source: {u})"))
+        .unwrap_or_default();
+    println!(
+        "Exported {} → {} ({} difficulties){}",
+        slug,
+        out.display(),
+        pkg.beatmaps.len(),
+        url_note
+    );
+    if pkg.song.source_url.is_none() {
+        println!("  hint: pass --source-url <URL> to record a download link in the package");
+    }
+    Ok(())
+}
+
+pub fn stamp_source_url(song_dir: &Path, url: &str) -> Result<()> {
+    let meta_path = song_dir.join("metadata.json");
+    let raw = std::fs::read_to_string(&meta_path)?;
+    let mut v: serde_json::Value = serde_json::from_str(&raw)?;
+    v["source_url"] = serde_json::Value::String(url.to_string());
+    if v["audio_sha256"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .is_none()
+        && let Some(audio_filename) = v["audio_file"].as_str()
+        && let Ok(hash) = import::sha256_of(&song_dir.join(audio_filename))
+    {
+        v["audio_sha256"] = serde_json::Value::String(hash);
+    }
+    std::fs::write(&meta_path, serde_json::to_string_pretty(&v)?)?;
+    Ok(())
+}
+
+pub fn import_pkg(file: &Path, fetch_audio: bool) -> Result<()> {
+    let songs_dir = Config::cascade_dir().join("songs");
+    std::fs::create_dir_all(&songs_dir)?;
+
+    let pkg = share::load_package(file)?;
+    let display = if pkg.song.artist.is_empty() {
+        pkg.song.title.clone()
+    } else {
+        format!("{} — {}", pkg.song.artist, pkg.song.title)
+    };
+    println!(
+        "Importing share package: {} ({} diffs)",
+        display,
+        pkg.beatmaps.len()
+    );
+
+    let outcome = share::install_package(&pkg, &songs_dir, fetch_audio)?;
+    println!("  installed → {}", outcome.song_dir.display());
+
+    match outcome.audio_status {
+        AudioStatus::Downloaded {
+            bytes,
+            hash_verified,
+        } => {
+            let verify = if hash_verified {
+                "  audio: downloaded ({} bytes), sha256 verified"
+            } else {
+                "  audio: downloaded ({} bytes), no hash recorded"
+            };
+            println!("{}", verify.replace("{}", &bytes.to_string()));
+        }
+        AudioStatus::HashMismatch { expected, got } => {
+            eprintln!(
+                "  audio: HASH MISMATCH — saved as `{}.mismatch`",
+                pkg.song.audio_file
+            );
+            eprintln!("    expected: {}", expected);
+            eprintln!("    got:      {}", got);
+            eprintln!(
+                "  the beatmaps may not line up. Re-download manually or contact the author."
+            );
+        }
+        AudioStatus::Missing { expected_filename } => {
+            println!(
+                "  audio: not included — drop `{}` into {} to play",
+                expected_filename,
+                outcome.song_dir.display()
+            );
+        }
+        AudioStatus::SkippedByFlag => {
+            println!(
+                "  audio: skipped (--no-fetch). Run `cascade add <url>` later or download manually."
+            );
+        }
+    }
+    println!("Slug: {}", outcome.slug);
     Ok(())
 }
 

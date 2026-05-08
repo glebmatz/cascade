@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-05-08
+
+### Added
+
+- **Share packages (`.cscd`)** — `cascade export <slug> [-o file.cscd]
+  [--source-url URL]` packs a song's metadata and all four beatmaps (without
+  audio) into a single JSON file. The export records an optional origin URL
+  and a SHA-256 of the source audio.
+- **`cascade import <file.cscd>`** — installs a share package. When the
+  package carries a `source_url`, the audio is downloaded automatically and
+  hash-verified against the recorded SHA-256. `--no-fetch` skips the
+  download. On hash mismatch the audio is renamed to `audio.mp3.mismatch`
+  with both expected and actual hashes printed, leaving the user in
+  control.
+- **URL imports for `cascade add`** — `cascade add https://example.com/song.mp3`
+  downloads the file, runs the normal import pipeline, and records the URL
+  as the song's `source_url` so a later `cascade export` ships it for
+  sharing. Same flow available for already-local files via
+  `cascade add ~/song.mp3 --source-url https://example.com/song.mp3`.
+- **`metadata.json`** gained two optional fields, `source_url` and
+  `audio_sha256`. Existing libraries are forward-compatible: missing fields
+  are simply omitted from `.cscd` exports.
+
 ## [0.7.0] — 2026-04-21
 
 ### Added
@@ -224,7 +247,8 @@ First public release.
   `cascade regen`, `cascade help`.
 - **Dual MIT / Apache-2.0 licensing**.
 
-[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/glebmatz/cascade/releases/tag/v0.8.0
 [0.7.0]: https://github.com/glebmatz/cascade/releases/tag/v0.7.0
 [0.6.1]: https://github.com/glebmatz/cascade/releases/tag/v0.6.1
 [0.6.0]: https://github.com/glebmatz/cascade/releases/tag/v0.6.0
