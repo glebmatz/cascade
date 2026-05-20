@@ -37,7 +37,7 @@ use app::{Action, App, Screen};
 use audio::sfx::{self, SfxPlayer};
 use beatmap::types::Difficulty;
 use config::Config;
-use play_history::{PlayHistory, PlayRecord};
+use play_history::{PlayHistory, PlayRecord, ReplayEvent};
 use score_store::{BestScore, ScoreStore};
 use screens::calibrate::CalibrateScreen;
 use screens::gameplay::GameplayScreen;
@@ -74,6 +74,42 @@ fn main() -> Result<()> {
                 let fetch = !args[3..].iter().any(|a| a == "--no-fetch");
                 return cli::import_pkg(&file, fetch);
             }
+            "pack" if args.len() >= 3 => match args[2].as_str() {
+                "export" if args.len() >= 5 => {
+                    let name = &args[3];
+                    let output = cli::extract_flag(&args[4..], "-o")
+                        .or_else(|| cli::extract_flag(&args[4..], "--output"))
+                        .map(PathBuf::from);
+                    let slugs = collect_pack_slugs(&args[4..]);
+                    return cli::export_pack(name, &slugs, output.as_deref());
+                }
+                "import" if args.len() >= 4 => {
+                    let file = PathBuf::from(&args[3]);
+                    let fetch = !args[4..].iter().any(|a| a == "--no-fetch");
+                    return cli::import_pack(&file, fetch);
+                }
+                _ => {
+                    eprintln!("Usage: cascade pack export <name> <slug...> [-o FILE.cpack]");
+                    eprintln!("       cascade pack import <file.cpack> [--no-fetch]");
+                    return Ok(());
+                }
+            },
+            "history" => return cli::history(),
+            "replay" if args.len() >= 3 => {
+                let rec = cli::find_run(&args[2])?;
+                let difficulty = parse_difficulty_name(&rec.difficulty);
+                let mods = game::modifiers::Mods::from_codes(&rec.mods);
+                return run_interactive(Some(StartSong {
+                    slug: rec.slug.clone(),
+                    difficulty,
+                    mods,
+                    practice: None,
+                    ghost: Some(ReplayGhost {
+                        events: rec.events.clone(),
+                        label: rec.run_id.clone(),
+                    }),
+                }));
+            }
             "achievements" => return cli::achievements_list(),
             "stats" => return cli::stats(),
             "themes" => return cli::themes(),
@@ -106,6 +142,7 @@ fn main() -> Result<()> {
                     difficulty,
                     mods,
                     practice,
+                    ghost: None,
                 }));
             }
             "help" | "--help" | "-h" => return cli::print_help(),
@@ -121,6 +158,43 @@ struct StartSong {
     difficulty: Option<Difficulty>,
     mods: game::modifiers::Mods,
     practice: Option<game::practice::PracticeSettings>,
+    ghost: Option<ReplayGhost>,
+}
+
+#[derive(Clone)]
+struct ReplayGhost {
+    events: Vec<ReplayEvent>,
+    label: String,
+}
+
+fn collect_pack_slugs(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut skip_next = false;
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "-o" || arg == "--output" {
+            skip_next = true;
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
+fn parse_difficulty_name(s: &str) -> Option<Difficulty> {
+    match s.to_ascii_lowercase().as_str() {
+        "easy" => Some(Difficulty::Easy),
+        "medium" => Some(Difficulty::Medium),
+        "hard" => Some(Difficulty::Hard),
+        "expert" => Some(Difficulty::Expert),
+        _ => None,
+    }
 }
 
 fn run_interactive(start_song: Option<StartSong>) -> Result<()> {
@@ -181,6 +255,7 @@ struct Session {
     last_beatmap_path: Option<PathBuf>,
     last_audio_path: Option<PathBuf>,
     last_song_title: String,
+    replay_ghost: Option<ReplayGhost>,
 }
 
 impl Session {
@@ -235,6 +310,7 @@ impl Session {
             last_beatmap_path: None,
             last_audio_path: None,
             last_song_title: String::new(),
+            replay_ghost: None,
         })
     }
 
@@ -280,8 +356,12 @@ impl Session {
         // Log to play_history. Failure to append is non-fatal: stats are nice
         // to have, but must never crash the game loop.
         let slug = cli::song_slug_from_path(&self.last_beatmap_path);
+        let mut history = PlayHistory::load(&self.history_path);
+        let ts = play_history::now_unix();
+        let run_id = play_history::make_run_id(ts, history.plays.len() + 1);
         let record = PlayRecord {
-            ts: play_history::now_unix(),
+            run_id: run_id.clone(),
+            ts,
             slug,
             title: self.last_song_title.clone(),
             difficulty: diff_name.clone(),
@@ -295,10 +375,11 @@ impl Session {
             song_duration_ms: gp.beatmap.song.duration_ms,
             grade: gp.state.grade().to_string(),
             died: gp.state.is_dead(),
+            events: gp.replay_events.clone(),
         };
-        let mut history = PlayHistory::load(&self.history_path);
         history.append(record);
         let _ = history.save(&self.history_path);
+        let breakdown = play_history::breakdown(&gp.replay_events, gp.beatmap.song.duration_ms);
 
         self.results = Some(ResultsScreen::new(
             gp.state,
@@ -308,6 +389,7 @@ impl Session {
             is_best,
             unlocked,
             gp.mods,
+            breakdown,
         ));
     }
 
@@ -389,6 +471,9 @@ impl Session {
             mods,
             practice_config,
         )?;
+        if let Some(ghost) = &self.replay_ghost {
+            gp.set_ghost(ghost.events.clone(), ghost.label.clone());
+        }
         gp.start();
         self.gameplay = Some(gp);
         Ok(true)
@@ -417,6 +502,7 @@ fn run(
                 if let Some(p) = start.practice {
                     session.song_select.practice = p;
                 }
+                session.replay_ghost = start.ghost;
                 session.song_select.selected = session
                     .song_select
                     .filtered_indices
@@ -645,6 +731,7 @@ fn transition_to(
         Screen::Menu => {
             session.last_beatmap_path = None;
             session.last_audio_path = None;
+            session.replay_ghost = None;
         }
         Screen::Stats => {
             let history = PlayHistory::load(&session.history_path);

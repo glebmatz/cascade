@@ -121,6 +121,12 @@ pub fn print_help() -> Result<()> {
          Pack metadata + all beatmaps into a .cscd share file\n  \
          cascade import <file.cscd> [--no-fetch]\n                                  \
          Install a share package; auto-downloads audio if URL is recorded\n  \
+         cascade pack export <name> <slug...> [-o FILE.cpack]\n                                  \
+         Pack multiple songs into one share bundle\n  \
+         cascade pack import <file.cpack> [--no-fetch]\n                                  \
+         Install every song from a pack\n  \
+         cascade history                 List recent runs and replay ids\n  \
+         cascade replay <run-id>          Play a song with that run as a ghost\n  \
          cascade achievements            List all achievements with unlock status\n  \
          cascade stats                   Show aggregate play statistics\n  \
          cascade themes                  List built-in + user themes, validate files\n  \
@@ -373,6 +379,111 @@ pub fn import_pkg(file: &Path, fetch_audio: bool) -> Result<()> {
     }
     println!("Slug: {}", outcome.slug);
     Ok(())
+}
+
+pub fn export_pack(name: &str, slugs: &[String], output_path: Option<&Path>) -> Result<()> {
+    if slugs.is_empty() {
+        anyhow::bail!("pack export needs at least one slug");
+    }
+    let songs_dir = Config::cascade_dir().join("songs");
+    let mut dirs = Vec::with_capacity(slugs.len());
+    for slug in slugs {
+        let dir = songs_dir.join(slug);
+        if !dir.is_dir() {
+            anyhow::bail!(
+                "Song '{}' not found. Use `cascade list` to see imported songs.",
+                slug
+            );
+        }
+        dirs.push(dir);
+    }
+
+    let pack = share::build_pack_from_dirs(name, &dirs)?;
+    let slug = import::slug_from_title(name);
+    let default_name = format!(
+        "{}.cpack",
+        if slug.is_empty() {
+            "cascade-pack"
+        } else {
+            slug.as_str()
+        }
+    );
+    let default_path = PathBuf::from(default_name);
+    let out = output_path.unwrap_or(&default_path);
+    share::save_pack(&pack, out)?;
+    println!(
+        "Exported pack '{}' → {} ({} songs)",
+        pack.name,
+        out.display(),
+        pack.packages.len()
+    );
+    Ok(())
+}
+
+pub fn import_pack(file: &Path, fetch_audio: bool) -> Result<()> {
+    let songs_dir = Config::cascade_dir().join("songs");
+    std::fs::create_dir_all(&songs_dir)?;
+    let pack = share::load_pack(file)?;
+    println!(
+        "Importing pack: {} ({} songs)",
+        pack.name,
+        pack.packages.len()
+    );
+    let outcomes = share::install_pack(&pack, &songs_dir, fetch_audio)?;
+    for (pkg, outcome) in pack.packages.iter().zip(outcomes.iter()) {
+        let display = if pkg.song.artist.is_empty() {
+            pkg.song.title.clone()
+        } else {
+            format!("{} — {}", pkg.song.artist, pkg.song.title)
+        };
+        println!("  {} → {}", display, outcome.slug);
+    }
+    Ok(())
+}
+
+pub fn history() -> Result<()> {
+    let hist = PlayHistory::load(&Config::cascade_dir().join("play_history.json"));
+    if hist.plays.is_empty() {
+        println!("No runs recorded yet.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<14}{:<24}{:<8}{:<10}{:<7}GHOST",
+        "RUN ID", "SONG", "DIFF", "SCORE", "ACC"
+    );
+    println!("{}", "─".repeat(80));
+    for rec in hist.plays.iter().rev().take(20) {
+        let title: String = rec.title.chars().take(22).collect();
+        let ghost = if rec.events.iter().any(|e| e.input_time_ms.is_some()) {
+            "yes"
+        } else {
+            "no"
+        };
+        println!(
+            "{:<14}{:<24}{:<8}{:<10}{:<6.1}%{}",
+            rec.run_id,
+            title,
+            rec.difficulty.to_uppercase(),
+            rec.score,
+            rec.accuracy,
+            ghost
+        );
+    }
+    println!("\nUse `cascade replay <run-id>` to play against a ghost.");
+    Ok(())
+}
+
+pub fn find_run(run_id: &str) -> Result<play_history::PlayRecord> {
+    let hist = PlayHistory::load(&Config::cascade_dir().join("play_history.json"));
+    let rec = hist
+        .find_run(run_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("Run '{}' not found. Use `cascade history`.", run_id))?;
+    if !rec.events.iter().any(|e| e.input_time_ms.is_some()) {
+        anyhow::bail!("Run '{}' has no replayable input events.", run_id);
+    }
+    Ok(rec)
 }
 
 pub fn rename(slug: &str, new_title: Option<&str>, new_artist: Option<&str>) -> Result<()> {

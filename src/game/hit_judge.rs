@@ -61,6 +61,10 @@ impl HitJudge {
         current_time_ms as i64 - self.offset_ms > note_time_ms as i64 + Self::MISS_MS as i64
     }
 
+    pub fn timing_offset_ms(&self, note_time_ms: u64, press_time_ms: u64) -> i64 {
+        press_time_ms as i64 - self.offset_ms - note_time_ms as i64
+    }
+
     #[allow(dead_code)]
     pub fn hit_window_ms(&self) -> u64 {
         Self::MISS_MS

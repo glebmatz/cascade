@@ -231,3 +231,28 @@ fn package_filename_extension_is_cscd() {
     assert!(p.is_file());
     assert!(share::load_package(&p).is_ok());
 }
+
+#[test]
+fn pack_export_then_install_multiple_songs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let song_a = tmp.path().join("songs/a");
+    let song_b = tmp.path().join("songs/b");
+    write_song_dir(&song_a, None, None);
+    write_song_dir(&song_b, Some("https://x/b.mp3"), Some("aa"));
+
+    let pack = share::build_pack_from_dirs("Starter Pack", &[song_a, song_b]).unwrap();
+    assert_eq!(pack.format, share::PACK_FORMAT_TAG);
+    assert_eq!(pack.packages.len(), 2);
+
+    let p = tmp.path().join("starter.cpack");
+    share::save_pack(&pack, &p).unwrap();
+    let loaded = share::load_pack(&p).unwrap();
+    assert_eq!(loaded.name, "Starter Pack");
+    assert_eq!(loaded.packages.len(), 2);
+
+    let dest = tmp.path().join("recipient/songs");
+    let outcomes = share::install_pack(&loaded, &dest, false).unwrap();
+    assert_eq!(outcomes.len(), 2);
+    assert!(outcomes[0].song_dir.join("hard.json").is_file());
+    assert!(outcomes[1].song_dir.join("hard.json").is_file());
+}

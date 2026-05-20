@@ -13,6 +13,13 @@ const LANE_COUNT: usize = 5;
 const NOTE_PX_HEIGHT: i32 = 3;
 const ANTICIPATION_MS: f64 = 250.0;
 
+#[derive(Debug, Clone, Copy)]
+pub struct GhostMarker {
+    pub lane: u8,
+    pub position: f64,
+    pub judgement: Judgement,
+}
+
 pub struct HighwayWidget<'a> {
     pub notes: &'a [VisibleNote],
     pub lane_labels: [&'a str; LANE_COUNT],
@@ -30,6 +37,7 @@ pub struct HighwayWidget<'a> {
     pub current_ms: u64,
     pub look_ahead_ms: f64,
     pub mods: Mods,
+    pub ghost_markers: &'a [GhostMarker],
     /// Chromatic aberration strength in 0..=1. Peaks on a Perfect hit and
     /// decays over a few frames. Splits R/B channels ±1px horizontally.
     pub aberration: f32,
@@ -54,12 +62,18 @@ impl<'a> HighwayWidget<'a> {
             current_ms: 0,
             look_ahead_ms: 2000.0,
             mods: Mods::new(),
+            ghost_markers: &[],
             aberration: 0.0,
         }
     }
 
     pub fn with_mods(mut self, mods: Mods) -> Self {
         self.mods = mods;
+        self
+    }
+
+    pub fn with_ghost_markers(mut self, markers: &'a [GhostMarker]) -> Self {
+        self.ghost_markers = markers;
         self
     }
 
@@ -145,6 +159,7 @@ impl<'a> Widget for HighwayWidget<'a> {
         self.draw_lane_backgrounds(&mut px, &local_x, area, highway_height, combo_heat, &theme);
         self.draw_lane_bursts(&mut px, &local_x, area, highway_height, &theme);
         self.draw_hold_trails(&mut px, &local_x, area, highway_height, &theme);
+        self.draw_ghost_markers(&mut px, &local_x, area, highway_height, &theme);
         self.draw_notes(&mut px, &local_x, area, highway_height, &theme);
         self.draw_particles(&mut px, &local_x);
         apply_vignette(&mut px, area.width, height_px);
@@ -390,6 +405,49 @@ impl<'a> HighwayWidget<'a> {
                 let right = note_x + note_w;
                 if right < area.x + area.width {
                     px.blend(local_x(right), py, halo, 0.4);
+                }
+            }
+        }
+    }
+
+    fn draw_ghost_markers(
+        &self,
+        px: &mut PixelBuffer,
+        local_x: &impl Fn(u16) -> u16,
+        area: Rect,
+        highway_height: u16,
+        theme: &theme::Theme,
+    ) {
+        let height_px = highway_height as i32 * 2;
+        for marker in self.ghost_markers {
+            if marker.position < -0.1 || marker.position > 1.05 {
+                continue;
+            }
+            let lane = marker.lane as usize;
+            if lane >= LANE_COUNT {
+                continue;
+            }
+            let center_py = ((1.0 - marker.position) * height_px as f64) as i32;
+            let row = (center_py / 2).clamp(0, highway_height as i32 - 1) as u16;
+            let (lx, lw) = self.lane_rect(lane, row, highway_height, area);
+            let cx = lx + lw / 2;
+            let base = match marker.judgement {
+                Judgement::Perfect => theme.judgement[0],
+                Judgement::Great => theme.judgement[1],
+                Judgement::Good => theme.judgement[2],
+                Judgement::Miss => theme.judgement[3],
+            };
+            let color = color_mul(base, 0.8);
+            for dx in -2..=2i32 {
+                let x = cx as i32 + dx;
+                if x >= area.x as i32 && x < (area.x + area.width) as i32 {
+                    px.blend(local_x(x as u16), center_py, color, 0.75);
+                }
+            }
+            for dy in -1..=1i32 {
+                let py = center_py + dy;
+                if py >= 0 && py < height_px {
+                    px.blend(local_x(cx), py, color, 0.55);
                 }
             }
         }

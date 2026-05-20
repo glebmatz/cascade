@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-05-20
+
+### Added
+
+- **Replay ghosts** — every non-practice run now records compact timing events
+  in `play_history.json` and gets a stable `run_id`. `cascade history` lists
+  recent runs, and `cascade replay <run-id>` launches the same song with that
+  run rendered as ghost markers on the highway.
+- **Results timing breakdown** — the Results screen now summarizes calibrated
+  early/late bias, early vs late counts, the lane with the most misses, and
+  the roughest 15-second window.
+- **Song packs (`.cpack`)** — `cascade pack export <name> <slug...>` bundles
+  multiple normal share packages into one JSON pack, and `cascade pack import`
+  installs every song in it.
+
 ## [0.8.0] — 2026-05-08
 
 ### Added
@@ -247,7 +262,8 @@ First public release.
   `cascade regen`, `cascade help`.
 - **Dual MIT / Apache-2.0 licensing**.
 
-[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/glebmatz/cascade/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/glebmatz/cascade/releases/tag/v0.8.0
 [0.7.0]: https://github.com/glebmatz/cascade/releases/tag/v0.7.0
 [0.6.1]: https://github.com/glebmatz/cascade/releases/tag/v0.6.1

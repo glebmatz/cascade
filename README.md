@@ -63,6 +63,9 @@ hold-note release detection.
 - **Modifiers** — Hidden, Flashlight, Sudden Death, Perfect Only. Each combo gets its own best-score slot
 - **Drain mode** — optional survival variant where health bleeds over time; only Perfects meaningfully restore it
 - **Practice mode** — loop any section at any speed from 0.25× to 2.0×, perfect for drilling that one run you keep bailing on
+- **Replay ghosts** — every scored run records timing events; race an old run with `cascade replay <run-id>`
+- **Results breakdown** — see early/late bias, roughest section, and miss-heavy lane immediately after a run
+- **Song packs** — bundle multiple `.cscd` share packages into one `.cpack`
 - **Achievements** — 12 unlockables for combos, full clears, mod runs
 - **Stats dashboard** — aggregate play history with a 30-day accuracy sparkline and activity heatmap, both in the UI and via `cascade stats`
 - **Themes** — five built-in palettes (Classic / Neon / Mono / Sunset / Ocean); switch instantly from Settings
@@ -139,6 +142,10 @@ cascade achievements
 
 # Aggregate play stats (top songs, 30-day accuracy sparkline, activity heatmap):
 cascade stats
+
+# Replay against a previous run:
+cascade history
+cascade replay 662f0f00-0004
 
 # …or just run `cascade` for the full interactive UI.
 cascade
@@ -364,7 +371,9 @@ wrong array length, slug conflicts, duplicates).
 
 ## Stats
 
-Every non-practice run is logged to `~/.cascade/play_history.json`. Open the
+Every non-practice run is logged to `~/.cascade/play_history.json`. Runs now
+include replay timing events: note index, lane, input time, calibrated offset,
+judgement, and event kind. Open the
 `Stats` entry from the main menu, or run:
 
 ```sh
@@ -383,9 +392,29 @@ You get:
   (`· ░ ▒ ▓ █`).
 - **Achievement progress** — unlocked out of total.
 
-Practice runs are excluded — they are for learning, not for stats. The file
-grows by about one kilobyte per 10 plays; a few thousand plays still loads
-instantly.
+Practice runs are excluded — they are for learning, not for stats. Replay
+events make the file scale with note count, but typical libraries still stay
+small enough to load instantly.
+
+### Replays and results breakdown
+
+List recent runs with replay ids:
+
+```sh
+cascade history
+```
+
+Then race one of them as a ghost:
+
+```sh
+cascade replay 662f0f00-0004
+```
+
+The ghost is drawn as small cross markers on the highway using the prior run's
+actual input timestamps, so early and late hits drift around the live notes
+instead of snapping to the beatmap. The Results screen also summarizes timing
+bias, early/late counts, the lane with the most misses, and the roughest
+15-second window.
 
 ## How the beatmap generator works
 
@@ -451,6 +480,24 @@ You can also import directly from a URL without packing:
 cascade add https://example.com/song.mp3
 ```
 
+### Song packs (`.cpack`)
+
+For multiple songs, export a pack:
+
+```sh
+cascade pack export "Starter Pack" song-one song-two song-three -o starter.cpack
+```
+
+Install it on another machine:
+
+```sh
+cascade pack import starter.cpack
+```
+
+A `.cpack` is just a JSON bundle of normal Cascade share packages. Audio is
+still fetched per song from each package's `source_url`, or reported as missing
+when no URL is recorded.
+
 Cascade itself does not host any audio. Use this with files you have the
 right to redistribute (your own work, public-domain tracks, Creative
 Commons, etc.).
@@ -458,9 +505,10 @@ Commons, etc.).
 ## Roadmap
 
 - [x] Online song sharing (upload beatmap JSON, not audio)
+- [x] Replay ghosts and run breakdowns
+- [x] Multi-song share packs
 - [ ] Multiplayer via terminal-to-terminal
 - [ ] Note editor for hand-tuning generated maps
-- [ ] Per-run hit-deviation histogram on the Results screen
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 

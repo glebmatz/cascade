@@ -14,7 +14,8 @@ use crate::game::hit_judge::{HitJudge, Judgement};
 use crate::game::modifiers::{Modifier, Mods};
 use crate::game::practice::PracticeConfig;
 use crate::game::state::GameState;
-use crate::ui::highway_render::HighwayWidget;
+use crate::play_history::ReplayEvent;
+use crate::ui::highway_render::{GhostMarker, HighwayWidget};
 use crate::ui::hud::{HudBottom, HudTop};
 
 const SPECTRUM_CHUNK: usize = 1024;
@@ -94,6 +95,11 @@ pub struct GameplayScreen {
     /// Audio speed multiplier. Always set (1.0 when not in practice) so every
     /// caller goes through `position_ms_in_track` uniformly.
     pub speed: f32,
+    /// Captured timing events for this run. Persisted into play history when
+    /// the run finishes and reused by `cascade replay` as ghost data.
+    pub replay_events: Vec<ReplayEvent>,
+    pub ghost_events: Vec<ReplayEvent>,
+    pub ghost_label: Option<String>,
 }
 
 pub struct MilestoneSplash {
@@ -177,9 +183,17 @@ impl GameplayScreen {
             practice,
             practice_label,
             speed,
+            replay_events: Vec::new(),
+            ghost_events: Vec::new(),
+            ghost_label: None,
             beatmap,
             audio,
         })
+    }
+
+    pub fn set_ghost(&mut self, events: Vec<ReplayEvent>, label: String) {
+        self.ghost_events = events;
+        self.ghost_label = Some(label);
     }
 
     pub fn start(&mut self) {
@@ -392,6 +406,7 @@ impl GameplayScreen {
         } else {
             0.0
         };
+        let ghost_markers = self.visible_ghost_markers();
         HighwayWidget::new(&self.highway.visible_notes)
             .with_hit_flash(self.hit_flash)
             .with_lane_burst(self.lane_burst)
@@ -408,10 +423,12 @@ impl GameplayScreen {
             .with_combo(self.state.combo)
             .with_timing(self.position_ms_in_track(), 2000.0 / self.scroll_speed)
             .with_mods(self.mods.clone())
+            .with_ghost_markers(&ghost_markers)
             .with_aberration(aberration)
             .render(mid_area, buf);
 
         self.draw_milestone_splash(buf, area);
+        self.draw_ghost_label(buf, area);
 
         let progress = if let Some(p) = &self.practice {
             // Progress through the practice section (0..1) — not the song.
@@ -494,16 +511,32 @@ impl GameplayScreen {
     }
 
     fn complete_hold(&mut self, idx: usize, lane: usize) {
+        let note = &self.beatmap.notes[idx];
+        let note_time_ms = note.time_ms + note.duration_ms;
+        let note_lane = note.lane;
         self.hit_notes[idx] = true;
         self.held_notes[lane] = None;
         self.aberration_frames = ABERRATION_FRAMES_ON_PERFECT;
-        self.register_judgement(Judgement::Perfect, lane);
+        let final_judgement = self.register_judgement(Judgement::Perfect, lane);
+        self.record_replay_event(
+            idx,
+            note_time_ms,
+            note_lane,
+            None,
+            None,
+            final_judgement,
+            "hold_complete",
+        );
         self.check_milestone();
     }
 
     fn register_miss(&mut self, idx: usize) {
+        let note = &self.beatmap.notes[idx];
+        let lane = note.lane;
+        let note_time_ms = note.time_ms;
         self.hit_notes[idx] = true;
         self.state.register_judgement(Judgement::Miss);
+        self.record_replay_event(idx, note_time_ms, lane, None, None, Judgement::Miss, "miss");
         self.judgement_timer = JUDGEMENT_DISPLAY_FRAMES;
         self.judgement_elapsed = 0;
         self.shake_frames = SHAKE_FRAMES_ON_MISS;
@@ -518,7 +551,7 @@ impl GameplayScreen {
         }
     }
 
-    fn register_judgement(&mut self, judgement: Judgement, lane: usize) {
+    fn register_judgement(&mut self, judgement: Judgement, lane: usize) -> Judgement {
         let judgement = self.transform_judgement(judgement);
         self.state.register_judgement(judgement);
         self.judgement_timer = JUDGEMENT_DISPLAY_FRAMES;
@@ -540,6 +573,7 @@ impl GameplayScreen {
             sfx::SFX_SAMPLE_RATE,
             self.sfx_volume,
         );
+        judgement
     }
 
     fn transform_judgement(&self, j: Judgement) -> Judgement {
@@ -548,6 +582,53 @@ impl GameplayScreen {
         } else {
             j
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_replay_event(
+        &mut self,
+        note_idx: usize,
+        note_time_ms: u64,
+        lane: u8,
+        input_time_ms: Option<u64>,
+        offset_ms: Option<i64>,
+        judgement: Judgement,
+        kind: &str,
+    ) {
+        self.replay_events.push(ReplayEvent {
+            note_idx,
+            note_time_ms,
+            lane,
+            input_time_ms,
+            offset_ms,
+            judgement: judgement.label().to_ascii_lowercase(),
+            kind: kind.to_string(),
+        });
+    }
+
+    fn visible_ghost_markers(&self) -> Vec<GhostMarker> {
+        if self.ghost_events.is_empty() {
+            return Vec::new();
+        }
+        let current_ms = self.position_ms_in_track();
+        let look_ahead = (2000.0 / self.scroll_speed).max(1.0);
+        let start = current_ms.saturating_sub(500);
+        let end = current_ms + look_ahead as u64;
+        self.ghost_events
+            .iter()
+            .filter_map(|ev| {
+                let t = ev.input_time_ms?;
+                if t < start || t > end {
+                    return None;
+                }
+                let judgement = judgement_from_label(&ev.judgement);
+                Some(GhostMarker {
+                    lane: ev.lane,
+                    position: (t as f64 - current_ms as f64) / look_ahead,
+                    judgement,
+                })
+            })
+            .collect()
     }
 
     fn handle_key_press(&mut self, lane: usize) {
@@ -564,23 +645,35 @@ impl GameplayScreen {
         let best = self.find_closest_note(lane, current_ms);
         let Some((note_idx, _)) = best else { return };
 
-        let note = &self.beatmap.notes[note_idx];
-        let judgement = self.judge.judge(note.time_ms, current_ms);
+        let note_time_ms = self.beatmap.notes[note_idx].time_ms;
+        let note_lane = self.beatmap.notes[note_idx].lane;
+        let note_duration_ms = self.beatmap.notes[note_idx].duration_ms;
+        let judgement = self.judge.judge(note_time_ms, current_ms);
 
-        if note.duration_ms > 0 {
-            self.state.register_judgement(judgement);
-            self.judgement_timer = JUDGEMENT_DISPLAY_FRAMES;
-            self.judgement_elapsed = 0;
-            self.held_notes[lane] = Some(note_idx);
-            self.lane_burst[lane] = LANE_BURST_FRAMES;
-            self.audio.play_sfx(
-                sfx::sfx_for(judgement),
-                sfx::SFX_SAMPLE_RATE,
-                self.sfx_volume,
+        if note_duration_ms > 0 {
+            let final_judgement = self.register_judgement(judgement, lane);
+            self.record_replay_event(
+                note_idx,
+                note_time_ms,
+                note_lane,
+                Some(current_ms),
+                Some(self.judge.timing_offset_ms(note_time_ms, current_ms)),
+                final_judgement,
+                "hold_start",
             );
+            self.held_notes[lane] = Some(note_idx);
         } else {
             self.hit_notes[note_idx] = true;
-            self.register_judgement(judgement, lane);
+            let final_judgement = self.register_judgement(judgement, lane);
+            self.record_replay_event(
+                note_idx,
+                note_time_ms,
+                note_lane,
+                Some(current_ms),
+                Some(self.judge.timing_offset_ms(note_time_ms, current_ms)),
+                final_judgement,
+                "tap",
+            );
         }
 
         if let Some(area) = self.last_render_area {
@@ -619,6 +712,8 @@ impl GameplayScreen {
                 continue;
             };
             let note = &self.beatmap.notes[idx];
+            let note_time = note.time_ms;
+            let note_duration = note.duration_ms;
             let Some(target) = note.slide_to else {
                 continue;
             };
@@ -627,8 +722,8 @@ impl GameplayScreen {
             }
             // Slide press is valid from the moment the hold starts through a
             // small grace past its end — missing slides leak to process_auto_events.
-            let valid_until = note.time_ms + note.duration_ms + HitJudge::MISS_MS;
-            if current_ms < note.time_ms || current_ms > valid_until {
+            let valid_until = note_time + note_duration + HitJudge::MISS_MS;
+            if current_ms < note_time || current_ms > valid_until {
                 continue;
             }
             self.hit_notes[idx] = true;
@@ -636,7 +731,18 @@ impl GameplayScreen {
             self.held_notes[lane] = None;
             self.lane_burst[lane] = LANE_BURST_FRAMES;
             self.aberration_frames = ABERRATION_FRAMES_ON_PERFECT;
-            self.register_judgement(Judgement::Perfect, lane);
+            let note_time_ms = note_time + note_duration;
+            let note_lane = lane as u8;
+            let final_judgement = self.register_judgement(Judgement::Perfect, lane);
+            self.record_replay_event(
+                idx,
+                note_time_ms,
+                note_lane,
+                Some(current_ms),
+                Some(self.judge.timing_offset_ms(note_time_ms, current_ms)),
+                final_judgement,
+                "slide",
+            );
             self.check_milestone();
             if let Some(area) = self.last_render_area {
                 self.spawn_hit_particles(lane, Judgement::Perfect, area);
@@ -858,6 +964,19 @@ impl GameplayScreen {
                 .bold(),
         );
     }
+
+    fn draw_ghost_label(&self, buf: &mut Buffer, area: Rect) {
+        let Some(label) = &self.ghost_label else {
+            return;
+        };
+        let text = format!("GHOST {}", label);
+        let w = text.chars().count() as u16;
+        let x = area.x + area.width.saturating_sub(w + 2);
+        let y = area.y + 1;
+        if y < area.y + area.height {
+            buf.set_string(x, y, text, Style::default().fg(Color::Rgb(150, 150, 170)));
+        }
+    }
 }
 
 fn apply_shake(mid_area: &mut Rect, parent: Rect, shake_dx: i16) {
@@ -945,4 +1064,13 @@ fn init_stars() -> Vec<Star> {
         });
     }
     stars
+}
+
+fn judgement_from_label(label: &str) -> Judgement {
+    match label.to_ascii_lowercase().as_str() {
+        "perfect" => Judgement::Perfect,
+        "great" => Judgement::Great,
+        "good" => Judgement::Good,
+        _ => Judgement::Miss,
+    }
 }

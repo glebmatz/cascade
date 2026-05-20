@@ -6,6 +6,7 @@ const DAY: u64 = 86_400;
 
 fn rec(ts: u64, slug: &str, title: &str, diff: &str, score: u64, acc: f64) -> PlayRecord {
     PlayRecord {
+        run_id: format!("run-{ts}-{slug}"),
         ts,
         slug: slug.to_string(),
         title: title.to_string(),
@@ -20,6 +21,7 @@ fn rec(ts: u64, slug: &str, title: &str, diff: &str, score: u64, acc: f64) -> Pl
         song_duration_ms: 120_000,
         grade: "A".to_string(),
         died: false,
+        events: Vec::new(),
     }
 }
 

@@ -1,9 +1,10 @@
-use cascade::play_history::{PlayHistory, PlayRecord};
+use cascade::play_history::{self, PlayHistory, PlayRecord, ReplayEvent};
 use std::path::Path;
 use tempfile::TempDir;
 
 fn sample_record(ts: u64, slug: &str, score: u64) -> PlayRecord {
     PlayRecord {
+        run_id: format!("run-{ts}"),
         ts,
         slug: slug.to_string(),
         title: "Song Title".to_string(),
@@ -18,6 +19,7 @@ fn sample_record(ts: u64, slug: &str, score: u64) -> PlayRecord {
         song_duration_ms: 60_000,
         grade: "A".to_string(),
         died: false,
+        events: Vec::new(),
     }
 }
 
@@ -63,4 +65,46 @@ fn append_preserves_order() {
     hist.append(sample_record(30, "c", 3));
     let slugs: Vec<&str> = hist.plays.iter().map(|p| p.slug.as_str()).collect();
     assert_eq!(slugs, vec!["a", "b", "c"]);
+}
+
+#[test]
+fn breakdown_reports_bias_and_rough_spots() {
+    let events = vec![
+        ReplayEvent {
+            note_idx: 0,
+            note_time_ms: 1_000,
+            lane: 0,
+            input_time_ms: Some(990),
+            offset_ms: Some(-10),
+            judgement: "great".to_string(),
+            kind: "tap".to_string(),
+        },
+        ReplayEvent {
+            note_idx: 1,
+            note_time_ms: 2_000,
+            lane: 1,
+            input_time_ms: Some(2_030),
+            offset_ms: Some(30),
+            judgement: "perfect".to_string(),
+            kind: "tap".to_string(),
+        },
+        ReplayEvent {
+            note_idx: 2,
+            note_time_ms: 16_000,
+            lane: 1,
+            input_time_ms: None,
+            offset_ms: None,
+            judgement: "miss".to_string(),
+            kind: "miss".to_string(),
+        },
+    ];
+
+    let b = play_history::breakdown(&events, 60_000);
+    assert_eq!(b.hit_events, 2);
+    assert_eq!(b.early, 1);
+    assert_eq!(b.late, 1);
+    assert_eq!(b.misses, 1);
+    assert_eq!(b.worst_lane, Some((1, 1)));
+    assert_eq!(b.worst_section, Some((15_000, 1)));
+    assert!((b.avg_offset_ms.unwrap() - 10.0).abs() < 1e-9);
 }

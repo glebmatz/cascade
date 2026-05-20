@@ -2,6 +2,7 @@ use crate::achievements::AchievementId;
 use crate::app::{Action, Screen};
 use crate::game::modifiers::Mods;
 use crate::game::state::GameState;
+use crate::play_history::RunBreakdown;
 use crate::score_store::BestScore;
 use crate::ui::chrome::{render_bottom_bar, render_top_bar};
 use ratatui::prelude::*;
@@ -19,9 +20,11 @@ pub struct ResultsScreen {
     pub anim_ticks: u32,
     pub unlocked: Vec<AchievementId>,
     pub mods: Mods,
+    pub breakdown: RunBreakdown,
 }
 
 impl ResultsScreen {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         state: GameState,
         song_title: String,
@@ -30,6 +33,7 @@ impl ResultsScreen {
         new_best: bool,
         unlocked: Vec<AchievementId>,
         mods: Mods,
+        breakdown: RunBreakdown,
     ) -> Self {
         Self {
             state,
@@ -44,6 +48,7 @@ impl ResultsScreen {
             anim_ticks: 0,
             unlocked,
             mods,
+            breakdown,
         }
     }
 
@@ -236,6 +241,47 @@ impl ResultsScreen {
         }
         y += 1;
 
+        if let Some(avg) = self.breakdown.avg_offset_ms {
+            let bias = if avg < -1.0 {
+                format!("{:.0}ms early", avg.abs())
+            } else if avg > 1.0 {
+                format!("{:.0}ms late", avg)
+            } else {
+                "centered".to_string()
+            };
+            let mut line = format!(
+                "timing: {}   early {} / late {}",
+                bias, self.breakdown.early, self.breakdown.late
+            );
+            if let Some((lane, count)) = self.breakdown.worst_lane {
+                line.push_str(&format!("   misses lane {}: {}", lane_label(lane), count));
+            }
+            let w = line.chars().count() as u16;
+            buf.set_string(
+                cx.saturating_sub(w / 2),
+                y,
+                &line,
+                Style::default().fg(Color::Rgb(160, 170, 185)),
+            );
+            y += 1;
+        }
+        if let Some((section_ms, count)) = self.breakdown.worst_section {
+            let line = format!(
+                "roughest: {} window  ({} miss{})",
+                crate::game::practice::format_mmss(section_ms),
+                count,
+                if count == 1 { "" } else { "es" }
+            );
+            let w = line.chars().count() as u16;
+            buf.set_string(
+                cx.saturating_sub(w / 2),
+                y,
+                &line,
+                Style::default().fg(Color::Rgb(130, 140, 155)),
+            );
+            y += 1;
+        }
+
         // Mods badge
         if !self.mods.is_empty() {
             let badge = format!("Played with {}", self.mods.badge());
@@ -290,6 +336,17 @@ impl ResultsScreen {
             buf.set_string(cx.saturating_sub(w / 2), y, &text, style);
             y += 1;
         }
+    }
+}
+
+fn lane_label(lane: u8) -> &'static str {
+    match lane {
+        0 => "D",
+        1 => "F",
+        2 => "Space",
+        3 => "J",
+        4 => "K",
+        _ => "?",
     }
 }
 

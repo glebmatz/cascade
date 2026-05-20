@@ -13,6 +13,8 @@ use crate::beatmap::types::{Beatmap, Difficulty};
 
 pub const FORMAT_TAG: &str = "cascade-share";
 pub const FORMAT_VERSION: u32 = 1;
+pub const PACK_FORMAT_TAG: &str = "cascade-pack";
+pub const PACK_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharePackage {
@@ -20,6 +22,14 @@ pub struct SharePackage {
     pub version: u32,
     pub song: ShareMetadata,
     pub beatmaps: BTreeMap<String, Beatmap>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharePack {
+    pub format: String,
+    pub version: u32,
+    pub name: String,
+    pub packages: Vec<SharePackage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +68,27 @@ pub fn build_from_dir(song_dir: &Path) -> Result<SharePackage> {
     })
 }
 
+pub fn build_pack_from_dirs(name: &str, song_dirs: &[std::path::PathBuf]) -> Result<SharePack> {
+    if name.trim().is_empty() {
+        return Err(anyhow!("pack name cannot be empty"));
+    }
+    if song_dirs.is_empty() {
+        return Err(anyhow!("pack needs at least one song"));
+    }
+
+    let mut packages = Vec::with_capacity(song_dirs.len());
+    for dir in song_dirs {
+        packages.push(build_from_dir(dir)?);
+    }
+
+    Ok(SharePack {
+        format: PACK_FORMAT_TAG.to_string(),
+        version: PACK_FORMAT_VERSION,
+        name: name.to_string(),
+        packages,
+    })
+}
+
 pub fn save_package(pkg: &SharePackage, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -65,6 +96,16 @@ pub fn save_package(pkg: &SharePackage, path: &Path) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(path, serde_json::to_string_pretty(pkg)?)?;
+    Ok(())
+}
+
+pub fn save_pack(pack: &SharePack, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(pack)?)?;
     Ok(())
 }
 
@@ -89,6 +130,32 @@ pub fn load_package(path: &Path) -> Result<SharePackage> {
         ));
     }
     Ok(pkg)
+}
+
+pub fn load_pack(path: &Path) -> Result<SharePack> {
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let pack: SharePack = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing {} as a Cascade pack", path.display()))?;
+    if pack.format != PACK_FORMAT_TAG {
+        return Err(anyhow!(
+            "{} is not a Cascade pack (format = {:?})",
+            path.display(),
+            pack.format
+        ));
+    }
+    if pack.version > PACK_FORMAT_VERSION {
+        return Err(anyhow!(
+            "{} requires a newer version of Cascade (pack format v{}, this binary supports v{})",
+            path.display(),
+            pack.version,
+            PACK_FORMAT_VERSION
+        ));
+    }
+    if pack.packages.is_empty() {
+        return Err(anyhow!("{} contains no songs", path.display()));
+    }
+    Ok(pack)
 }
 
 pub struct ImportOutcome {
@@ -184,6 +251,18 @@ pub fn install_package(
         slug,
         audio_status,
     })
+}
+
+pub fn install_pack(
+    pack: &SharePack,
+    songs_dir: &Path,
+    fetch_audio: bool,
+) -> Result<Vec<ImportOutcome>> {
+    let mut outcomes = Vec::with_capacity(pack.packages.len());
+    for pkg in &pack.packages {
+        outcomes.push(install_package(pkg, songs_dir, fetch_audio)?);
+    }
+    Ok(outcomes)
 }
 
 fn read_metadata(song_dir: &Path) -> Result<ShareMetadata> {

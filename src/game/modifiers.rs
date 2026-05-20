@@ -95,7 +95,7 @@ impl Mods {
     pub fn from_codes(s: &str) -> Self {
         Self {
             set: s
-                .split(',')
+                .split([',', '+'])
                 .map(|c| c.trim())
                 .filter(|c| !c.is_empty())
                 .filter_map(Modifier::from_code)
