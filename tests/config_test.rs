@@ -10,7 +10,17 @@ fn test_default_config() {
     assert_eq!(config.keys.lanes, ['d', 'f', ' ', 'j', 'k']);
     assert_eq!(config.audio.volume, 0.8);
     assert_eq!(config.audio.offset_ms, 0);
-    assert_eq!(config.display.fps, 60);
+    assert_eq!(config.display.theme, "classic");
+}
+
+#[test]
+fn test_config_with_legacy_fps_still_loads() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("config.toml");
+    let mut raw = toml::to_string_pretty(&Config::default()).unwrap();
+    raw = raw.replace("[display]", "[display]\nfps = 60");
+    std::fs::write(&path, raw).unwrap();
+    assert_eq!(Config::load(&path).unwrap().display.theme, "classic");
 }
 
 #[test]

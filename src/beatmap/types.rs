@@ -13,7 +13,9 @@ pub struct SongMeta {
     pub title: String,
     pub artist: String,
     pub audio_file: String,
-    pub bpm: u32,
+    pub bpm: f64,
+    #[serde(default)]
+    pub beat_offset_ms: f64,
     pub duration_ms: u64,
 }
 

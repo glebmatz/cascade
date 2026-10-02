@@ -28,7 +28,10 @@ use crossterm::{
         PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
+        disable_raw_mode, enable_raw_mode,
+    },
 };
 use ratatui::prelude::*;
 
@@ -238,6 +241,7 @@ struct Session {
     achievements: AchievementStore,
     history_path: PathBuf,
     sfx: Option<SfxPlayer>,
+    preview: Option<audio::preview::Preview>,
     /// Whether the terminal accepted kitty keyboard protocol flags. Gameplay
     /// needs this to choose between native-release and emulated-release hold
     /// detection.
@@ -274,6 +278,8 @@ impl Session {
         let scores_path = Config::cascade_dir().join("scores.json");
 
         let sfx = SfxPlayer::new((config.audio.volume as f32 * 0.6).clamp(0.0, 1.0)).ok();
+        let preview =
+            audio::preview::Preview::new((config.audio.volume as f32 * 0.7).clamp(0.0, 1.0)).ok();
         let scores = ScoreStore::load(&scores_path);
         let achievements_path = Config::cascade_dir().join("achievements.json");
         let achievements = AchievementStore::load(&achievements_path);
@@ -298,6 +304,7 @@ impl Session {
             achievements,
             history_path,
             sfx,
+            preview,
             kb_enhanced,
             app: App::new(),
             menu: MenuScreen::new(),
@@ -431,7 +438,7 @@ impl Session {
             return Ok(false);
         }
 
-        let bm = match beatmap::loader::load(&bp) {
+        let mut bm = match beatmap::loader::load(&bp) {
             Ok(bm) => bm,
             Err(e) => {
                 self.song_select.import_status = Some(format!("Beatmap error: {}", e));
@@ -439,12 +446,26 @@ impl Session {
             }
         };
 
+        let decoded = audio::analyzer::decode_for_playback(&ap)?;
+        if bm.version < beatmap::generator::BEATMAP_VERSION
+            && !decoded.mono.is_empty()
+            && let Some(dir) = bp.parent()
+        {
+            let difficulty = bm.difficulty;
+            let regenerated = beatmap::generator::write_all_beatmaps(
+                dir,
+                &decoded.mono,
+                decoded.sample_rate,
+                bm.song.clone(),
+            );
+            if let Some(fresh) = regenerated.into_iter().find(|m| m.difficulty == difficulty) {
+                bm = fresh;
+            }
+        }
+
         self.last_song_title = self.song_select.selected_song_title();
         self.last_beatmap_path = Some(bp);
         self.last_audio_path = Some(ap.clone());
-
-        let (samples, sample_rate) =
-            audio::analyzer::decode_audio(&ap).unwrap_or_else(|_| (vec![], 44100));
 
         // Practice neutralises mods and score/achievement persistence. A bad
         // section (start past the song) silently drops practice rather than
@@ -458,9 +479,7 @@ impl Session {
 
         let mut gp = GameplayScreen::new(
             bm,
-            &ap,
-            samples,
-            sample_rate,
+            decoded,
             self.config.audio.offset_ms,
             self.config.gameplay.scroll_speed,
             self.config.audio.volume,
@@ -532,9 +551,12 @@ fn run(
         update(&mut session, terminal);
         draw(&mut session, terminal)?;
 
-        let elapsed = frame_start.elapsed();
-        if elapsed < FRAME_DURATION {
-            std::thread::sleep(FRAME_DURATION - elapsed);
+        while session.app.running {
+            let remaining = FRAME_DURATION.saturating_sub(frame_start.elapsed());
+            if remaining.is_zero() || !event::poll(remaining)? {
+                break;
+            }
+            process_input(&mut session, terminal)?;
         }
     }
     Ok(())
@@ -682,6 +704,11 @@ fn transition_to(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     screen: Screen,
 ) -> Result<()> {
+    if screen != Screen::SongSelect
+        && let Some(preview) = &mut session.preview
+    {
+        preview.stop();
+    }
     match screen {
         Screen::SongSelect => {
             session.song_select.scan_songs(&session.songs_dir);
@@ -818,14 +845,11 @@ fn run_import(
                 title: song.title.clone(),
                 artist: song.artist.clone(),
                 audio_file: audio_filename,
-                bpm: 120,
+                bpm: 120.0,
+                beat_offset_ms: 0.0,
                 duration_ms,
             };
-            let beatmaps = beatmap::generator::generate_all_beatmaps(&samples, sample_rate, meta);
-            for bm in &beatmaps {
-                let path = song.dir.join(bm.difficulty.filename());
-                let _ = beatmap::loader::save(bm, &path);
-            }
+            beatmap::generator::write_all_beatmaps(&song.dir, &samples, sample_rate, meta);
             session.song_select.import_status = Some(format!("Imported: {}", song.title));
         }
         Err(e) => {
@@ -837,6 +861,16 @@ fn run_import(
 }
 
 fn update(session: &mut Session, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+    if let Some(preview) = &mut session.preview {
+        let target = if session.app.screen == Screen::SongSelect {
+            session.song_select.preview_target()
+        } else {
+            None
+        };
+        preview.request(target);
+        preview.tick();
+        session.song_select.preview_levels = preview.levels();
+    }
     match session.app.screen {
         Screen::Gameplay => {
             if let Some(gp) = &mut session.gameplay {
@@ -869,6 +903,7 @@ fn draw(
     session: &mut Session,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
+    execute!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
     terminal.draw(|frame| {
         let area = frame.area();
         match session.app.screen {
@@ -901,5 +936,6 @@ fn draw(
             }
         }
     })?;
+    execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
     Ok(())
 }

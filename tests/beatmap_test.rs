@@ -10,7 +10,8 @@ fn test_beatmap_serialization_roundtrip() {
             title: "Test Song".to_string(),
             artist: "Test Artist".to_string(),
             audio_file: "audio.mp3".to_string(),
-            bpm: 120,
+            bpm: 120.0,
+            beat_offset_ms: 0.0,
             duration_ms: 180000,
         },
         difficulty: Difficulty::Hard,
@@ -50,7 +51,7 @@ fn test_beatmap_serialization_roundtrip() {
 
     assert_eq!(loaded.version, 1);
     assert_eq!(loaded.song.title, "Test Song");
-    assert_eq!(loaded.song.bpm, 120);
+    assert_eq!(loaded.song.bpm, 120.0);
     assert_eq!(loaded.difficulty, Difficulty::Hard);
     assert_eq!(loaded.notes.len(), 4);
     assert_eq!(loaded.notes[0].time_ms, 1000);

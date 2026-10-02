@@ -50,9 +50,10 @@ cargo test
 ```
 
 Tests cover the hit-judge windows, score state machine, and config I/O. The
-beatmap generator is intentionally **not** unit-tested — it's validated by
-ear on real audio; feel free to contribute synthetic test vectors if you
-want to change that.
+beatmap generator is checked against synthetic click tracks and a kick/hat
+pattern in `tests/generator_timing_test.rs` (tempo, beat grid, and note
+timing within a few milliseconds); musical quality is still judged by ear on
+real audio, so describe what you listened to in generator PRs.
 
 ### Formatting and lints
 

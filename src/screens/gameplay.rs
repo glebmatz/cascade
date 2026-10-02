@@ -1,10 +1,9 @@
 use anyhow::Result;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::prelude::*;
-use std::path::Path;
 
 use crate::app::{Action, Screen};
-use crate::audio::analyzer::{SpectrumAnalyzer, SpectrumData};
+use crate::audio::analyzer::{DecodedAudio, SpectrumAnalyzer, SpectrumData};
 use crate::audio::player::AudioPlayer;
 use crate::audio::sfx;
 use crate::beatmap::types::Beatmap;
@@ -15,7 +14,7 @@ use crate::game::modifiers::{Modifier, Mods};
 use crate::game::practice::PracticeConfig;
 use crate::game::state::GameState;
 use crate::play_history::ReplayEvent;
-use crate::ui::highway_render::{GhostMarker, HighwayWidget};
+use crate::ui::highway_render::{GhostMarker, HighwayWidget, HitErrorMark};
 use crate::ui::hud::{HudBottom, HudTop};
 
 const SPECTRUM_CHUNK: usize = 1024;
@@ -28,6 +27,9 @@ const SHAKE_FRAMES_ON_MISS: u8 = 6;
 const HOLD_RELEASE_GRACE_MS: u64 = 50;
 const STAR_COUNT: usize = 40;
 const ABERRATION_FRAMES_ON_PERFECT: u8 = 6;
+const HIT_ERROR_FADE_MS: u64 = 3000;
+const HIT_ERROR_MARKS: usize = 24;
+const INTENSITY_STEP_MS: u64 = 100;
 
 const COMBO_MILESTONES: &[(u32, &str)] = &[
     (25, "NICE!"),
@@ -100,6 +102,9 @@ pub struct GameplayScreen {
     pub replay_events: Vec<ReplayEvent>,
     pub ghost_events: Vec<ReplayEvent>,
     pub ghost_label: Option<String>,
+    pub offset_ms: i64,
+    pub intensity: Vec<f32>,
+    pub warp: f32,
 }
 
 pub struct MilestoneSplash {
@@ -112,9 +117,7 @@ impl GameplayScreen {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         beatmap: Beatmap,
-        _audio_path: &Path,
-        samples: Vec<f32>,
-        sample_rate: u32,
+        decoded: DecodedAudio,
         offset_ms: i32,
         scroll_speed: f64,
         volume: f64,
@@ -126,8 +129,10 @@ impl GameplayScreen {
         practice: Option<PracticeConfig>,
     ) -> Result<Self> {
         let mut audio = AudioPlayer::new()?;
-        audio.load_samples(&samples, sample_rate)?;
+        audio.load_samples(decoded.interleaved, decoded.channels, decoded.sample_rate)?;
         audio.set_volume(volume as f32);
+        let samples = decoded.mono;
+        let sample_rate = decoded.sample_rate;
 
         let mut beatmap = beatmap;
         if !holds_enabled {
@@ -146,10 +151,11 @@ impl GameplayScreen {
         state.drain_mode = drain_active;
 
         let waveform = downsample_waveform(&samples, 512);
+        let intensity = intensity_envelope(&samples, sample_rate);
 
         Ok(Self {
             highway: Highway::new(scroll_speed),
-            judge: HitJudge::new(offset_ms),
+            judge: HitJudge::new(0),
             state,
             hit_notes,
             held_notes: vec![None; 5],
@@ -186,6 +192,9 @@ impl GameplayScreen {
             replay_events: Vec::new(),
             ghost_events: Vec::new(),
             ghost_label: None,
+            offset_ms: offset_ms as i64,
+            intensity,
+            warp: 0.0,
             beatmap,
             audio,
         })
@@ -219,6 +228,10 @@ impl GameplayScreen {
         (self.audio.position_ms() as f64 * self.speed as f64) as u64
     }
 
+    pub fn game_ms(&self) -> u64 {
+        (self.position_ms_in_track() as i64 - self.offset_ms).max(0) as u64
+    }
+
     pub fn update(&mut self) {
         if self.paused || self.finished {
             return;
@@ -235,7 +248,7 @@ impl GameplayScreen {
             return;
         }
 
-        let current_ms = self.position_ms_in_track();
+        let current_ms = self.game_ms();
 
         self.highway.update(
             &self.beatmap.notes,
@@ -247,6 +260,12 @@ impl GameplayScreen {
         self.process_auto_events(current_ms);
         self.emulate_hold_releases(current_ms);
         self.tick_visual_timers();
+        let target = self
+            .intensity
+            .get((current_ms / INTENSITY_STEP_MS) as usize)
+            .copied()
+            .unwrap_or(0.0);
+        self.warp += (target - self.warp) * 0.04;
         self.advance_stars();
         self.advance_particles();
         self.update_spectrum(current_ms);
@@ -321,6 +340,7 @@ impl GameplayScreen {
         self.milestone = None;
         self.last_milestone = 0;
         self.particles.clear();
+        self.replay_events.clear();
     }
 
     pub fn handle_action(&mut self, action: Action) -> Option<Action> {
@@ -338,7 +358,7 @@ impl GameplayScreen {
                 None
             }
             Action::GameKey(lane) if !self.paused && !self.finished => {
-                let now = self.position_ms_in_track();
+                let now = self.game_ms();
                 let prev_seen = self.hold_last_seen_ms[lane];
                 self.hold_last_seen_ms[lane] = now;
                 // On terminals that don't report Repeat events (e.g. macOS
@@ -359,7 +379,7 @@ impl GameplayScreen {
                 // Repeat event — refresh "still held" timer for hold emulation.
                 // Ignored on terminals that report real release events.
                 if !self.kb_enhanced {
-                    self.hold_last_seen_ms[lane] = self.position_ms_in_track();
+                    self.hold_last_seen_ms[lane] = self.game_ms();
                 }
                 None
             }
@@ -407,6 +427,7 @@ impl GameplayScreen {
             0.0
         };
         let ghost_markers = self.visible_ghost_markers();
+        let hit_errors = self.hit_error_marks();
         HighwayWidget::new(&self.highway.visible_notes)
             .with_hit_flash(self.hit_flash)
             .with_lane_burst(self.lane_burst)
@@ -421,10 +442,12 @@ impl GameplayScreen {
             .with_energy(self.spectrum.energy)
             .with_beat_pulse(self.beat_pulse())
             .with_combo(self.state.combo)
-            .with_timing(self.position_ms_in_track(), 2000.0 / self.scroll_speed)
+            .with_timing(self.game_ms(), 2000.0 / self.scroll_speed)
             .with_mods(self.mods.clone())
             .with_ghost_markers(&ghost_markers)
             .with_aberration(aberration)
+            .with_hit_errors(&hit_errors)
+            .with_warp(self.warp)
             .render(mid_area, buf);
 
         self.draw_milestone_splash(buf, area);
@@ -610,7 +633,7 @@ impl GameplayScreen {
         if self.ghost_events.is_empty() {
             return Vec::new();
         }
-        let current_ms = self.position_ms_in_track();
+        let current_ms = self.game_ms();
         let look_ahead = (2000.0 / self.scroll_speed).max(1.0);
         let start = current_ms.saturating_sub(500);
         let end = current_ms + look_ahead as u64;
@@ -631,9 +654,35 @@ impl GameplayScreen {
             .collect()
     }
 
+    fn hit_error_marks(&self) -> Vec<HitErrorMark> {
+        let now = self.game_ms();
+        let mut marks: Vec<HitErrorMark> = self
+            .replay_events
+            .iter()
+            .rev()
+            .map(|ev| {
+                (
+                    ev,
+                    now.saturating_sub(ev.input_time_ms.unwrap_or(ev.note_time_ms)),
+                )
+            })
+            .take_while(|&(_, age)| age < HIT_ERROR_FADE_MS)
+            .filter_map(|(ev, age)| {
+                Some(HitErrorMark {
+                    offset_ms: ev.offset_ms?,
+                    judgement: judgement_from_label(&ev.judgement),
+                    fade: 1.0 - age as f32 / HIT_ERROR_FADE_MS as f32,
+                })
+            })
+            .take(HIT_ERROR_MARKS)
+            .collect();
+        marks.reverse();
+        marks
+    }
+
     fn handle_key_press(&mut self, lane: usize) {
         self.hit_flash[lane] = HIT_FLASH_FRAMES;
-        let current_ms = self.position_ms_in_track();
+        let current_ms = self.game_ms();
 
         // Slide completion takes priority over regular hit detection: pressing
         // the slide target while its source hold is still active completes the
@@ -696,7 +745,7 @@ impl GameplayScreen {
             return;
         }
         let note_end = note.time_ms + note.duration_ms;
-        let current_ms = self.position_ms_in_track();
+        let current_ms = self.game_ms();
         if current_ms + HOLD_RELEASE_GRACE_MS < note_end {
             self.register_miss(idx);
         }
@@ -808,7 +857,7 @@ impl GameplayScreen {
         };
         let h_px = (area.height.saturating_sub(3) as i32) * 2;
         let w = area.width.max(1);
-        let speed_mult = self.scroll_speed as f32;
+        let speed_mult = self.scroll_speed as f32 * (0.6 + 2.4 * self.warp * self.warp);
         for s in &mut self.stars {
             s.y_px += s.speed * speed_mult;
             if s.y_px >= h_px as f32 {
@@ -877,9 +926,9 @@ impl GameplayScreen {
     }
 
     fn beat_pulse(&self) -> f32 {
-        let bpm = self.beatmap.song.bpm.max(60) as f32;
-        let beat_ms = 60_000.0 / bpm;
-        let phase = (self.position_ms_in_track() as f32 % beat_ms) / beat_ms;
+        let beat_ms = 60_000.0 / self.beatmap.song.bpm.max(60.0);
+        let rel = self.game_ms() as f64 - self.beatmap.song.beat_offset_ms;
+        let phase = (rel.rem_euclid(beat_ms) / beat_ms) as f32;
         let env = (1.0 - phase).powf(4.0);
         (env * (0.5 + 0.5 * self.spectrum.energy)).clamp(0.0, 1.0)
     }
@@ -1042,6 +1091,24 @@ fn downsample_waveform(samples: &[f32], buckets: usize) -> Vec<f32> {
         }
     }
     out
+}
+
+fn intensity_envelope(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    let step = (sample_rate as u64 * INTENSITY_STEP_MS / 1000).max(1) as usize;
+    let rms: Vec<f32> = samples
+        .chunks(step)
+        .map(|c| (c.iter().map(|v| v * v).sum::<f32>() / c.len() as f32).sqrt())
+        .collect();
+    let mut sorted = rms.clone();
+    sorted.sort_by(f32::total_cmp);
+    let Some(&hi) = sorted.get(sorted.len() * 95 / 100) else {
+        return rms;
+    };
+    let lo = sorted[sorted.len() / 10];
+    let range = (hi - lo).max(1e-6);
+    rms.iter()
+        .map(|v| ((v - lo) / range).clamp(0.0, 1.0))
+        .collect()
 }
 
 fn init_stars() -> Vec<Star> {

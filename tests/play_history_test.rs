@@ -107,4 +107,8 @@ fn breakdown_reports_bias_and_rough_spots() {
     assert_eq!(b.worst_lane, Some((1, 1)));
     assert_eq!(b.worst_section, Some((15_000, 1)));
     assert!((b.avg_offset_ms.unwrap() - 10.0).abs() < 1e-9);
+    assert_eq!(b.offset_histogram.iter().sum::<u32>(), 2);
+    assert_eq!(b.accuracy_timeline[1], Some(1.0));
+    assert_eq!(b.accuracy_timeline[5], None);
+    assert_eq!(b.accuracy_timeline[10], Some(0.0));
 }

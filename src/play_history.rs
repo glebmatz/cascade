@@ -111,10 +111,20 @@ pub struct RunBreakdown {
     pub on_time: u32,
     pub worst_lane: Option<(u8, u32)>,
     pub worst_section: Option<(u64, u32)>,
+    pub offset_histogram: Vec<u32>,
+    pub accuracy_timeline: Vec<Option<f32>>,
 }
 
+pub const SPREAD_WINDOW_MS: i64 = 120;
+const SPREAD_BINS: usize = 25;
+const TIMELINE_BUCKETS: usize = 40;
+
 pub fn breakdown(events: &[ReplayEvent], duration_ms: u64) -> RunBreakdown {
-    let mut out = RunBreakdown::default();
+    let mut out = RunBreakdown {
+        offset_histogram: vec![0; SPREAD_BINS],
+        ..RunBreakdown::default()
+    };
+    let mut timeline = vec![(0u32, 0u32); TIMELINE_BUCKETS];
     let mut offset_sum = 0i64;
     let mut offset_count = 0u32;
     let mut lane_misses = [0u32; 5];
@@ -124,6 +134,17 @@ pub fn breakdown(events: &[ReplayEvent], duration_ms: u64) -> RunBreakdown {
     let mut section_misses = vec![0u32; bucket_count];
 
     for ev in events {
+        let points = match ev.judgement.to_ascii_lowercase().as_str() {
+            "perfect" => 3,
+            "great" => 2,
+            "good" => 1,
+            _ => 0,
+        };
+        let bucket = (ev.note_time_ms as usize * TIMELINE_BUCKETS / duration_ms.max(1) as usize)
+            .min(TIMELINE_BUCKETS - 1);
+        timeline[bucket].0 += points;
+        timeline[bucket].1 += 3;
+
         if ev.judgement.eq_ignore_ascii_case("miss") {
             out.misses += 1;
             if (ev.lane as usize) < lane_misses.len() {
@@ -137,6 +158,10 @@ pub fn breakdown(events: &[ReplayEvent], duration_ms: u64) -> RunBreakdown {
             continue;
         };
         out.hit_events += 1;
+        let clamped = offset.clamp(-SPREAD_WINDOW_MS, SPREAD_WINDOW_MS);
+        let bin = ((clamped + SPREAD_WINDOW_MS) * SPREAD_BINS as i64 / (2 * SPREAD_WINDOW_MS + 1))
+            as usize;
+        out.offset_histogram[bin] += 1;
         offset_sum += offset;
         offset_count += 1;
         if offset < -5 {
@@ -151,6 +176,10 @@ pub fn breakdown(events: &[ReplayEvent], duration_ms: u64) -> RunBreakdown {
     if offset_count > 0 {
         out.avg_offset_ms = Some(offset_sum as f64 / offset_count as f64);
     }
+    out.accuracy_timeline = timeline
+        .iter()
+        .map(|&(earned, possible)| (possible > 0).then(|| earned as f32 / possible as f32))
+        .collect();
 
     out.worst_lane = lane_misses
         .iter()

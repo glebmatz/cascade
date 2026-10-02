@@ -3,7 +3,7 @@ use ratatui::widgets::Widget;
 
 use crate::game::effects::{Particle, Star};
 use crate::game::highway::VisibleNote;
-use crate::game::hit_judge::Judgement;
+use crate::game::hit_judge::{HitJudge, Judgement};
 use crate::game::modifiers::{Modifier, Mods};
 use crate::ui::color::{Rgb, add as color_add, mul as color_mul, smoothstep};
 use crate::ui::pixel_buffer::PixelBuffer;
@@ -12,6 +12,13 @@ use crate::ui::theme;
 const LANE_COUNT: usize = 5;
 const NOTE_PX_HEIGHT: i32 = 3;
 const ANTICIPATION_MS: f64 = 250.0;
+
+#[derive(Debug, Clone, Copy)]
+pub struct HitErrorMark {
+    pub offset_ms: i64,
+    pub judgement: Judgement,
+    pub fade: f32,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct GhostMarker {
@@ -41,6 +48,8 @@ pub struct HighwayWidget<'a> {
     /// Chromatic aberration strength in 0..=1. Peaks on a Perfect hit and
     /// decays over a few frames. Splits R/B channels ±1px horizontally.
     pub aberration: f32,
+    pub hit_errors: &'a [HitErrorMark],
+    pub warp: f32,
 }
 
 impl<'a> HighwayWidget<'a> {
@@ -64,7 +73,19 @@ impl<'a> HighwayWidget<'a> {
             mods: Mods::new(),
             ghost_markers: &[],
             aberration: 0.0,
+            hit_errors: &[],
+            warp: 0.0,
         }
+    }
+
+    pub fn with_hit_errors(mut self, marks: &'a [HitErrorMark]) -> Self {
+        self.hit_errors = marks;
+        self
+    }
+
+    pub fn with_warp(mut self, warp: f32) -> Self {
+        self.warp = warp.clamp(0.0, 1.0);
+        self
     }
 
     pub fn with_mods(mut self, mods: Mods) -> Self {
@@ -176,6 +197,7 @@ impl<'a> Widget for HighwayWidget<'a> {
         }
         self.draw_hit_zone(buf, area, highway_height, &theme);
         self.draw_judgement_feedback(buf, area, highway_height, &theme);
+        self.draw_hit_error_meter(buf, area, highway_height, &theme);
     }
 }
 
@@ -185,10 +207,14 @@ impl<'a> HighwayWidget<'a> {
             if star.y_px < 0.0 || star.y_px >= px.height_px as f32 {
                 continue;
             }
-            let cx = star.x as u16;
+            let cx = local_x(star.x as u16);
             let b = star.brightness;
             let color = (b, b, (b as u16 + 20).min(200) as u8);
-            px.blend(local_x(cx), star.y_px as i32, color, 0.55);
+            let trail = (star.speed * self.warp * self.warp * 6.0) as i32;
+            for t in 0..=trail {
+                let fade = 1.0 - t as f32 / (trail + 1) as f32;
+                px.blend(cx, star.y_px as i32 - t, color, 0.55 * fade);
+            }
         }
     }
 
@@ -368,44 +394,47 @@ impl<'a> HighwayWidget<'a> {
                 continue;
             }
             let approach = smoothstep(0.5, 0.0, note.position as f32);
-            let center_py = ((1.0 - note.position) * height_px as f64) as i32;
-            let row = (center_py / 2).clamp(0, highway_height as i32 - 1) as u16;
+            let center = (1.0 - note.position) * height_px as f64;
+            let row = ((center as i32) / 2).clamp(0, highway_height as i32 - 1) as u16;
             let (lx, lw) = self.lane_rect(note.lane as usize, row, highway_height, area);
             let lane_color = theme.lane_colors[note.lane as usize % LANE_COUNT];
 
             let note_w = lw.saturating_sub(1).max(1);
             let note_x = lx + lw.saturating_sub(note_w) / 2;
+            let span = local_x(note_x)..local_x(note_x + note_w);
+            let top = center - (NOTE_PX_HEIGHT / 2) as f64;
+            let bottom = top + NOTE_PX_HEIGHT as f64;
 
             for dy in 0..NOTE_PX_HEIGHT {
-                let py = center_py + dy - NOTE_PX_HEIGHT / 2;
                 let base_i = match dy {
                     0 => 0.65,
                     1 => 1.0,
                     _ => 0.85,
                 };
                 let intensity = (base_i + 0.25 * approach).min(1.25);
-                let color = color_mul(lane_color, intensity);
-                for cx in note_x..note_x + note_w {
-                    px.blend(local_x(cx), py, color, 1.0);
-                }
+                let y0 = top + dy as f64;
+                blend_rows(
+                    px,
+                    span.clone(),
+                    y0,
+                    y0 + 1.0,
+                    color_mul(lane_color, intensity),
+                    1.0,
+                );
             }
 
             let halo = color_mul(lane_color, 0.55 + 0.35 * approach);
-            for &dy in &[-NOTE_PX_HEIGHT / 2 - 1, NOTE_PX_HEIGHT / 2 + 1] {
-                let py = center_py + dy;
-                for cx in note_x..note_x + note_w {
-                    px.blend(local_x(cx), py, halo, 0.35 + 0.25 * approach);
-                }
+            let halo_alpha = 0.35 + 0.25 * approach;
+            blend_rows(px, span.clone(), top - 1.0, top, halo, halo_alpha);
+            blend_rows(px, span, bottom, bottom + 1.0, halo, halo_alpha);
+            if note_x > area.x {
+                let x = local_x(note_x - 1);
+                blend_rows(px, x..x + 1, top, bottom, halo, 0.4);
             }
-            for dy in -NOTE_PX_HEIGHT / 2..=NOTE_PX_HEIGHT / 2 {
-                let py = center_py + dy;
-                if note_x > area.x {
-                    px.blend(local_x(note_x - 1), py, halo, 0.4);
-                }
-                let right = note_x + note_w;
-                if right < area.x + area.width {
-                    px.blend(local_x(right), py, halo, 0.4);
-                }
+            let right = note_x + note_w;
+            if right < area.x + area.width {
+                let x = local_x(right);
+                blend_rows(px, x..x + 1, top, bottom, halo, 0.4);
             }
         }
     }
@@ -427,8 +456,8 @@ impl<'a> HighwayWidget<'a> {
             if lane >= LANE_COUNT {
                 continue;
             }
-            let center_py = ((1.0 - marker.position) * height_px as f64) as i32;
-            let row = (center_py / 2).clamp(0, highway_height as i32 - 1) as u16;
+            let center = (1.0 - marker.position) * height_px as f64;
+            let row = ((center as i32) / 2).clamp(0, highway_height as i32 - 1) as u16;
             let (lx, lw) = self.lane_rect(lane, row, highway_height, area);
             let cx = lx + lw / 2;
             let base = match marker.judgement {
@@ -438,18 +467,11 @@ impl<'a> HighwayWidget<'a> {
                 Judgement::Miss => theme.judgement[3],
             };
             let color = color_mul(base, 0.8);
-            for dx in -2..=2i32 {
-                let x = cx as i32 + dx;
-                if x >= area.x as i32 && x < (area.x + area.width) as i32 {
-                    px.blend(local_x(x as u16), center_py, color, 0.75);
-                }
-            }
-            for dy in -1..=1i32 {
-                let py = center_py + dy;
-                if py >= 0 && py < height_px {
-                    px.blend(local_x(cx), py, color, 0.55);
-                }
-            }
+            let x0 = local_x(cx.saturating_sub(2).max(area.x));
+            let x1 = local_x((cx + 3).min(area.x + area.width));
+            blend_rows(px, x0..x1, center, center + 1.0, color, 0.75);
+            let x = local_x(cx);
+            blend_rows(px, x..x + 1, center - 1.0, center + 2.0, color, 0.55);
         }
     }
 
@@ -547,6 +569,71 @@ impl<'a> HighwayWidget<'a> {
                         .bold(),
                 );
             }
+        }
+    }
+
+    fn draw_hit_error_meter(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        highway_height: u16,
+        theme: &theme::Theme,
+    ) {
+        let y = area.y + highway_height + 2;
+        let half = (area.width.saturating_sub(10) / 2).min(20) as i64;
+        if y >= area.y + area.height || half < 6 {
+            return;
+        }
+        let rgb = |c: Rgb| Color::Rgb(c.0, c.1, c.2);
+        let cx = (area.x + area.width / 2) as i64;
+        let window = HitJudge::GOOD_MS as i64;
+        let zone_bg = |dx: i64| {
+            let ms = (dx * window / half).unsigned_abs();
+            let zone = if ms <= HitJudge::PERFECT_MS {
+                theme.judgement[0]
+            } else if ms <= HitJudge::GREAT_MS {
+                theme.judgement[1]
+            } else {
+                theme.judgement[2]
+            };
+            rgb(color_mul(zone, 0.16))
+        };
+
+        for dx in -half..=half {
+            let (glyph, fg) = if dx == 0 {
+                ("┃", Color::Rgb(120, 120, 130))
+            } else {
+                (" ", Color::Reset)
+            };
+            buf.set_string(
+                (cx + dx) as u16,
+                y,
+                glyph,
+                Style::default().fg(fg).bg(zone_bg(dx)),
+            );
+        }
+        if cx - half - 7 >= area.x as i64 && cx + half + 6 <= (area.x + area.width) as i64 {
+            let label = Style::default().fg(Color::Rgb(90, 90, 100));
+            buf.set_string((cx - half - 6) as u16, y, "early", label);
+            buf.set_string((cx + half + 2) as u16, y, "late", label);
+        }
+
+        for mark in self.hit_errors {
+            let dx = (mark.offset_ms * half / window).clamp(-half, half);
+            let base = match mark.judgement {
+                Judgement::Perfect => theme.judgement[0],
+                Judgement::Great => theme.judgement[1],
+                Judgement::Good => theme.judgement[2],
+                Judgement::Miss => theme.judgement[3],
+            };
+            buf.set_string(
+                (cx + dx) as u16,
+                y,
+                "│",
+                Style::default()
+                    .fg(rgb(color_mul(base, 0.35 + 0.65 * mark.fade)))
+                    .bg(zone_bg(dx)),
+            );
         }
     }
 
@@ -699,6 +786,26 @@ fn apply_aberration(px: &mut PixelBuffer, width: u16, height_px: i32, strength: 
             );
             px.set(x, py, mixed);
         }
+    }
+}
+
+fn blend_rows(
+    px: &mut PixelBuffer,
+    xs: std::ops::Range<u16>,
+    y0: f64,
+    y1: f64,
+    color: Rgb,
+    alpha: f32,
+) {
+    let mut row = y0.floor() as i32;
+    while (row as f64) < y1 {
+        let coverage = ((row + 1) as f64).min(y1) - (row as f64).max(y0);
+        if coverage > 0.0 {
+            for x in xs.clone() {
+                px.blend(x, row, color, alpha * coverage as f32);
+            }
+        }
+        row += 1;
     }
 }
 

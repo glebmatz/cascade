@@ -1,4 +1,5 @@
 use crate::app::{Action, Screen};
+use crate::beatmap::rating;
 use crate::beatmap::types::{Beatmap, Difficulty};
 use crate::game::modifiers::Mods;
 use crate::game::practice::{self, PracticeSettings};
@@ -15,13 +16,16 @@ pub struct SongEntry {
     pub artist: String,
     pub dir: PathBuf,
     pub slug: String,
-    pub bpm: u32,
+    pub bpm: f64,
     pub duration_ms: u64,
     /// Filesystem mtime in seconds since epoch — used for "Recently added" sort.
     pub added_secs: u64,
     /// Note counts per Difficulty (Easy, Medium, Hard, Expert).
     pub note_counts: [u32; 4],
     pub present: [bool; 4],
+    pub stars: [f32; 4],
+    pub preview_ms: u64,
+    pub audio_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +80,7 @@ pub struct SongSelectScreen {
     /// Digits-only buffer for the focused MM:SS field while typing.
     pub practice_buf: String,
     pub practice_error: Option<String>,
+    pub preview_levels: Option<[f32; 3]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +120,7 @@ impl SongSelectScreen {
             practice_focus: PracticeField::Start,
             practice_buf: String::new(),
             practice_error: None,
+            preview_levels: None,
         }
     }
 
@@ -144,7 +150,9 @@ impl SongSelectScreen {
             let diffs = Difficulty::all();
             let mut present = [false; 4];
             let mut note_counts = [0u32; 4];
-            let mut bpm = 0u32;
+            let mut stars = [0.0f32; 4];
+            let mut preview_ms = 0u64;
+            let mut bpm = 0.0;
             let mut duration_ms = 0u64;
 
             for (i, d) in diffs.iter().enumerate() {
@@ -157,7 +165,9 @@ impl SongSelectScreen {
                     && let Ok(bm) = serde_json::from_str::<Beatmap>(&s)
                 {
                     note_counts[i] = bm.notes.len() as u32;
-                    if bpm == 0 {
+                    stars[i] = rating::star_rating(&bm.notes);
+                    preview_ms = rating::preview_start_ms(&bm.notes, bm.song.duration_ms);
+                    if bpm == 0.0 {
                         bpm = bm.song.bpm;
                     }
                     if duration_ms == 0 {
@@ -168,9 +178,9 @@ impl SongSelectScreen {
             if !present.iter().any(|&p| p) {
                 continue;
             }
-            if find_audio_file(&path).is_none() {
+            let Some(audio_path) = find_audio_file(&path) else {
                 continue;
-            }
+            };
 
             // Metadata
             let meta_path = path.join("metadata.json");
@@ -222,6 +232,9 @@ impl SongSelectScreen {
                 added_secs,
                 note_counts,
                 present,
+                stars,
+                preview_ms,
+                audio_path,
             });
         }
 
@@ -238,7 +251,7 @@ impl SongSelectScreen {
                 ka.cmp(&kb)
             }),
             SortMode::Added => self.songs.sort_by_key(|a| std::cmp::Reverse(a.added_secs)),
-            SortMode::Bpm => self.songs.sort_by_key(|a| a.bpm),
+            SortMode::Bpm => self.songs.sort_by(|a, b| a.bpm.total_cmp(&b.bpm)),
         }
     }
 
@@ -278,6 +291,11 @@ impl SongSelectScreen {
         self.real_index()
             .and_then(|i| self.songs.get(i))
             .and_then(|s| find_audio_file(&s.dir))
+    }
+
+    pub fn preview_target(&self) -> Option<(PathBuf, u64)> {
+        let song = self.songs.get(self.real_index()?)?;
+        Some((song.audio_path.clone(), song.preview_ms))
     }
 
     pub fn selected_song_title(&self) -> String {
@@ -1283,15 +1301,13 @@ impl SongSelectScreen {
 
             // Accent bar on the left for selected row.
             if is_sel {
-                for dy in 0..row_h {
-                    buf.set_string(
-                        area.x + 2,
-                        y + dy,
-                        "│",
-                        Style::default()
-                            .fg(difficulty_color(self.difficulty))
-                            .bold(),
-                    );
+                let accent = difficulty_color(self.difficulty);
+                if let Some(levels) = self.preview_levels {
+                    render_level_bars(buf, area.x + 2, y, levels, accent);
+                } else {
+                    for dy in 0..row_h {
+                        buf.set_string(area.x + 2, y + dy, "│", Style::default().fg(accent).bold());
+                    }
                 }
             }
 
@@ -1310,7 +1326,7 @@ impl SongSelectScreen {
             let best_txt = self
                 .scores
                 .get(&song.slug, &self.difficulty.to_string())
-                .map(|b| format!("★ {} ({})", b.score, b.grade))
+                .map(|b| format!("♛ {} ({})", b.score, b.grade))
                 .unwrap_or_else(|| String::from("—"));
             let bw = best_txt.chars().count() as u16;
             let bx = area.x + area.width.saturating_sub(bw + 3);
@@ -1323,7 +1339,7 @@ impl SongSelectScreen {
 
             // Row 2: meta
             let y2 = y + 1;
-            let bpm_txt = format!("{} BPM", song.bpm);
+            let bpm_txt = format!("{:.0} BPM", song.bpm);
             let dur_txt = format!(
                 "{}:{:02}",
                 song.duration_ms / 60_000,
@@ -1337,6 +1353,15 @@ impl SongSelectScreen {
                 &meta,
                 Style::default().fg(Color::Rgb(110, 110, 110)),
             );
+            if song.present[diff_idx] {
+                let stars = song.stars[diff_idx];
+                buf.set_string(
+                    row_x + meta.chars().count() as u16 + 2,
+                    y2,
+                    format!("★ {stars:.1}"),
+                    Style::default().fg(star_color(stars)).bold(),
+                );
+            }
 
             // Difficulty dots (far right of row 2).
             let _ = cx;
@@ -1344,6 +1369,30 @@ impl SongSelectScreen {
             render_difficulty_dots(buf, dots_x, y2, song.present, Some(self.difficulty));
 
             drawn += row_h;
+        }
+    }
+}
+
+fn star_color(stars: f32) -> Color {
+    match stars {
+        s if s < 2.0 => Color::Rgb(120, 210, 140),
+        s if s < 3.5 => Color::Rgb(110, 180, 240),
+        s if s < 5.0 => Color::Rgb(240, 200, 90),
+        s if s < 6.5 => Color::Rgb(240, 130, 80),
+        _ => Color::Rgb(220, 90, 200),
+    }
+}
+
+fn render_level_bars(buf: &mut Buffer, x: u16, y: u16, levels: [f32; 3], color: Color) {
+    for (i, level) in levels.iter().enumerate() {
+        let height = (level.clamp(0.0, 1.0).powf(0.6) * 4.0).round().max(1.0) as u8;
+        for (row, filled) in [(1u16, height.min(2)), (0, height.saturating_sub(2))] {
+            let glyph = match filled {
+                0 => " ",
+                1 => "▄",
+                _ => "█",
+            };
+            buf.set_string(x + i as u16, y + row, glyph, Style::default().fg(color));
         }
     }
 }

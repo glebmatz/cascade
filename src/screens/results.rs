@@ -249,36 +249,38 @@ impl ResultsScreen {
             } else {
                 "centered".to_string()
             };
-            let mut line = format!(
-                "timing: {}   early {} / late {}",
-                bias, self.breakdown.early, self.breakdown.late
-            );
-            if let Some((lane, count)) = self.breakdown.worst_lane {
-                line.push_str(&format!("   misses lane {}: {}", lane_label(lane), count));
-            }
-            let w = line.chars().count() as u16;
-            buf.set_string(
-                cx.saturating_sub(w / 2),
-                y,
-                &line,
+            let mut segments = vec![("spread ".to_string(), dim_style())];
+            segments.extend(spread_strip(&self.breakdown.offset_histogram));
+            segments.push((
+                format!(
+                    "  {}  early {} / late {}",
+                    bias, self.breakdown.early, self.breakdown.late
+                ),
                 Style::default().fg(Color::Rgb(160, 170, 185)),
-            );
+            ));
+            draw_centered(buf, cx, y, &segments);
             y += 1;
         }
-        if let Some((section_ms, count)) = self.breakdown.worst_section {
-            let line = format!(
-                "roughest: {} window  ({} miss{})",
-                crate::game::practice::format_mmss(section_ms),
-                count,
-                if count == 1 { "" } else { "es" }
-            );
-            let w = line.chars().count() as u16;
-            buf.set_string(
-                cx.saturating_sub(w / 2),
-                y,
-                &line,
-                Style::default().fg(Color::Rgb(130, 140, 155)),
-            );
+        if self.breakdown.accuracy_timeline.iter().any(Option::is_some) {
+            let mut segments = vec![("flow   ".to_string(), dim_style())];
+            segments.extend(flow_strip(&self.breakdown.accuracy_timeline));
+            let mut notes = Vec::new();
+            if let Some((section_ms, _)) = self.breakdown.worst_section {
+                notes.push(format!(
+                    "roughest {}",
+                    crate::game::practice::format_mmss(section_ms)
+                ));
+            }
+            if let Some((lane, count)) = self.breakdown.worst_lane {
+                notes.push(format!("lane {} ×{}", lane_label(lane), count));
+            }
+            if !notes.is_empty() {
+                segments.push((
+                    format!("  {}", notes.join(" · ")),
+                    Style::default().fg(Color::Rgb(130, 140, 155)),
+                ));
+            }
+            draw_centered(buf, cx, y, &segments);
             y += 1;
         }
 
@@ -337,6 +339,76 @@ impl ResultsScreen {
             y += 1;
         }
     }
+}
+
+fn dim_style() -> Style {
+    Style::default().fg(Color::Rgb(90, 90, 100))
+}
+
+fn draw_centered(buf: &mut Buffer, cx: u16, y: u16, segments: &[(String, Style)]) {
+    let width: usize = segments.iter().map(|(t, _)| t.chars().count()).sum();
+    let mut x = cx.saturating_sub(width as u16 / 2);
+    for (text, style) in segments {
+        buf.set_string(x, y, text, *style);
+        x += text.chars().count() as u16;
+    }
+}
+
+const LEVELS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+fn level_glyph(v: f32) -> &'static str {
+    LEVELS[((v.clamp(0.0, 1.0) * 7.0).round() as usize).min(7)]
+}
+
+fn spread_strip(histogram: &[u32]) -> Vec<(String, Style)> {
+    let max = histogram.iter().copied().max().unwrap_or(0).max(1) as f32;
+    let bins = histogram.len().max(1) as i64;
+    let window = crate::play_history::SPREAD_WINDOW_MS;
+    histogram
+        .iter()
+        .enumerate()
+        .map(|(i, &count)| {
+            let center_ms =
+                ((i as i64 * 2 + 1) * (2 * window + 1) / (2 * bins) - window).unsigned_abs();
+            let color = if count == 0 {
+                Color::Rgb(45, 45, 52)
+            } else if center_ms <= crate::game::hit_judge::HitJudge::PERFECT_MS {
+                Color::Rgb(255, 220, 120)
+            } else if center_ms <= crate::game::hit_judge::HitJudge::GREAT_MS {
+                Color::Rgb(130, 220, 140)
+            } else {
+                Color::Rgb(170, 170, 170)
+            };
+            (
+                level_glyph(count as f32 / max).to_string(),
+                Style::default().fg(color),
+            )
+        })
+        .collect()
+}
+
+fn flow_strip(timeline: &[Option<f32>]) -> Vec<(String, Style)> {
+    timeline
+        .iter()
+        .map(|slot| match slot {
+            None => ("·".to_string(), Style::default().fg(Color::Rgb(45, 45, 52))),
+            Some(acc) => {
+                let color = if *acc < 0.5 {
+                    Color::Rgb(220, 90, 90)
+                } else if *acc < 0.8 {
+                    Color::Rgb(230, 170, 90)
+                } else if *acc < 0.95 {
+                    Color::Rgb(200, 220, 120)
+                } else {
+                    Color::Rgb(130, 220, 140)
+                };
+                (
+                    level_glyph(acc * acc).to_string(),
+                    Style::default().fg(color),
+                )
+            }
+        })
+        .collect()
 }
 
 fn lane_label(lane: u8) -> &'static str {

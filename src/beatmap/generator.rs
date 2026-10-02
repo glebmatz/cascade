@@ -1,9 +1,13 @@
+use crate::beatmap::loader;
 use crate::beatmap::types::{Beatmap, Difficulty, Note, SongMeta};
 use rustfft::{FftPlanner, num_complex::Complex};
+use std::path::Path;
 
 pub const NUM_BANDS: usize = 8;
 const FFT_SIZE: usize = 2048;
 const HOP_SIZE: usize = 512;
+const SNAP_TOLERANCE_MS: f64 = 12.0;
+pub const BEATMAP_VERSION: u32 = 2;
 
 #[derive(Clone, Copy)]
 pub struct NoveltyFrame {
@@ -41,21 +45,35 @@ pub fn generate_all_beatmaps(
 ) -> Vec<Beatmap> {
     let frames = compute_novelty(samples, sample_rate);
     let bpm = detect_bpm(&frames);
-    let phase = detect_phase(&frames, bpm);
     let onsets = pick_peaks(&frames, 80);
+    let phase = align_phase_to_onsets(detect_phase(&frames, bpm), bpm, &onsets);
 
     let mut meta = song_meta;
     meta.bpm = bpm;
+    meta.beat_offset_ms = phase;
 
     Difficulty::all()
         .iter()
         .map(|&diff| Beatmap {
-            version: 1,
+            version: BEATMAP_VERSION,
             song: meta.clone(),
             difficulty: diff,
             notes: place_notes(&onsets, &frames, bpm, phase, diff),
         })
         .collect()
+}
+
+pub fn write_all_beatmaps(
+    dir: &Path,
+    samples: &[f32],
+    sample_rate: u32,
+    song_meta: SongMeta,
+) -> Vec<Beatmap> {
+    let beatmaps = generate_all_beatmaps(samples, sample_rate, song_meta);
+    for bm in &beatmaps {
+        let _ = loader::save(bm, &dir.join(bm.difficulty.filename()));
+    }
+    beatmaps
 }
 
 pub fn compute_novelty(samples: &[f32], sample_rate: u32) -> Vec<NoveltyFrame> {
@@ -100,7 +118,7 @@ pub fn compute_novelty(samples: &[f32], sample_rate: u32) -> Vec<NoveltyFrame> {
         prev_band_energy = band_energy;
 
         frames.push(NoveltyFrame {
-            time_ms: pos as f64 / sample_rate as f64 * 1000.0,
+            time_ms: (pos + FFT_SIZE - HOP_SIZE * 3 / 4) as f64 / sample_rate as f64 * 1000.0,
             novelty,
             band_fluxes,
             band_energy,
@@ -314,78 +332,154 @@ fn adaptive_threshold(novelty: &[f32], i: usize, half_window: usize) -> f32 {
     (median + 1.5 * mad).max(0.04)
 }
 
-pub fn detect_bpm(frames: &[NoveltyFrame]) -> u32 {
+pub fn detect_bpm(frames: &[NoveltyFrame]) -> f64 {
     if frames.len() < 32 {
-        return 120;
+        return 120.0;
     }
     let hop_ms = (frames[1].time_ms - frames[0].time_ms).max(1.0);
-    let novelty: Vec<f32> = frames.iter().map(|f| f.novelty).collect();
-    let mean: f32 = novelty.iter().sum::<f32>() / novelty.len() as f32;
-    let centered: Vec<f32> = novelty.iter().map(|v| v - mean).collect();
+    let novelty = smoothed_novelty(frames);
+    let acf = |lag: usize| autocorrelation(&novelty, lag);
 
-    let min_lag = ((60_000.0 / 200.0) / hop_ms).floor() as usize;
-    let max_lag = ((60_000.0 / 60.0) / hop_ms).ceil() as usize;
+    let min_lag = (((60_000.0 / 200.0) / hop_ms).floor() as usize).max(2);
+    let max_lag = (((60_000.0 / 60.0) / hop_ms).ceil() as usize).min(novelty.len() / 2);
+    if max_lag <= min_lag + 2 {
+        return 120.0;
+    }
 
     let mut best_lag = min_lag;
     let mut best_score = f32::MIN;
-    for lag in min_lag..max_lag.min(centered.len() / 2) {
-        let mut sum = 0.0_f32;
-        for i in 0..(centered.len() - lag) {
-            sum += centered[i] * centered[i + lag];
-        }
-        let bpm_est = 60_000.0 / (lag as f32 * hop_ms as f32);
-        let mid_bias = 1.0 - ((bpm_est - 120.0).abs() / 240.0).min(0.3);
-        let score = sum * mid_bias;
+    for lag in min_lag..=max_lag {
+        let bpm_est = 60_000.0 / (lag as f64 * hop_ms);
+        let score = acf(lag) * tempo_prior(bpm_est);
         if score > best_score {
             best_score = score;
             best_lag = lag;
         }
     }
 
-    let bpm = 60_000.0 / (best_lag as f64 * hop_ms);
-    bpm.round().clamp(60.0, 200.0) as u32
+    let mut lag =
+        best_lag as f64 + parabolic_offset(acf(best_lag - 1), acf(best_lag), acf(best_lag + 1));
+    let base = acf(best_lag);
+    for mult in [8usize, 4, 2] {
+        let center = (lag * mult as f64).round() as usize;
+        if center <= mult || center + mult + 1 >= novelty.len() / 2 {
+            continue;
+        }
+        let peak = (center - mult..=center + mult)
+            .max_by(|&a, &b| acf(a).total_cmp(&acf(b)))
+            .unwrap_or(center);
+        let peak_val = acf(peak);
+        if peak_val > 0.3 * base {
+            let frac = parabolic_offset(acf(peak - 1), peak_val, acf(peak + 1));
+            lag = (peak as f64 + frac) / mult as f64;
+            break;
+        }
+    }
+
+    (60_000.0 / (lag * hop_ms)).clamp(60.0, 200.0)
 }
 
-pub fn detect_phase(frames: &[NoveltyFrame], bpm: u32) -> u64 {
-    if frames.is_empty() || bpm == 0 {
-        return 0;
+pub fn detect_phase(frames: &[NoveltyFrame], bpm: f64) -> f64 {
+    if frames.len() < 2 || bpm <= 0.0 {
+        return 0.0;
     }
     let hop_ms = (frames[1].time_ms - frames[0].time_ms).max(1.0);
-    let beat_ms = 60_000.0 / bpm as f64;
-    let beat_hops = (beat_ms / hop_ms).round() as usize;
-    if beat_hops == 0 {
-        return 0;
+    let beat_frames = 60_000.0 / bpm / hop_ms;
+    let novelty = smoothed_novelty(frames);
+    let offsets = beat_frames.ceil() as usize;
+    if offsets == 0 {
+        return frames[0].time_ms;
     }
 
-    let novelty: Vec<f32> = frames.iter().map(|f| f.novelty).collect();
-    let mut best_offset = 0usize;
-    let mut best_score = f32::MIN;
-    for offset in 0..beat_hops {
+    let comb = |offset: usize| -> f32 {
         let mut sum = 0.0_f32;
-        let mut k = offset;
-        while k < novelty.len() {
-            let lo = k.saturating_sub(1);
-            let hi = (k + 1).min(novelty.len() - 1);
-            sum += novelty[lo..=hi].iter().cloned().fold(0.0_f32, f32::max);
-            k += beat_hops;
+        let mut k = 0usize;
+        loop {
+            let idx = (offset as f64 + k as f64 * beat_frames).round() as usize;
+            let Some(&v) = novelty.get(idx) else { break };
+            sum += v;
+            k += 1;
         }
-        if sum > best_score {
-            best_score = sum;
-            best_offset = offset;
-        }
+        sum
+    };
+    let scores: Vec<f32> = (0..offsets).map(comb).collect();
+    let best = (0..offsets)
+        .max_by(|&a, &b| scores[a].total_cmp(&scores[b]))
+        .unwrap_or(0);
+    let prev = scores[(best + offsets - 1) % offsets];
+    let next = scores[(best + 1) % offsets];
+    let offset = best as f64 + parabolic_offset(prev, scores[best], next);
+    frames[0].time_ms + offset * hop_ms
+}
+
+fn align_phase_to_onsets(phase_ms: f64, bpm: f64, onsets: &[Onset]) -> f64 {
+    let beat_ms = 60_000.0 / bpm;
+    let mut deviations: Vec<f64> = onsets
+        .iter()
+        .map(|o| {
+            let rel = o.time_ms as f64 - phase_ms;
+            rel - (rel / beat_ms).round() * beat_ms
+        })
+        .filter(|d| d.abs() < beat_ms / 8.0)
+        .collect();
+    if deviations.len() < 4 {
+        return phase_ms;
     }
-    (best_offset as f64 * hop_ms) as u64
+    deviations.sort_by(f64::total_cmp);
+    phase_ms + deviations[deviations.len() / 2]
+}
+
+fn smoothed_novelty(frames: &[NoveltyFrame]) -> Vec<f32> {
+    const KERNEL: [f32; 5] = [1.0, 2.0, 3.0, 2.0, 1.0];
+    let n = frames.len();
+    let mean = frames.iter().map(|f| f.novelty).sum::<f32>() / n.max(1) as f32;
+    (0..n)
+        .map(|i| {
+            let mut acc = 0.0;
+            for (k, w) in KERNEL.iter().enumerate() {
+                let j = (i + k).saturating_sub(2).min(n - 1);
+                acc += frames[j].novelty * w;
+            }
+            acc / 9.0 - mean
+        })
+        .collect()
+}
+
+fn autocorrelation(x: &[f32], lag: usize) -> f32 {
+    if lag >= x.len() {
+        return 0.0;
+    }
+    let n = x.len() - lag;
+    x[..n]
+        .iter()
+        .zip(&x[lag..])
+        .map(|(a, b)| a * b)
+        .sum::<f32>()
+        / n as f32
+}
+
+fn tempo_prior(bpm: f64) -> f32 {
+    let octaves = (bpm / 130.0).log2();
+    (-0.5 * octaves * octaves).exp() as f32
+}
+
+fn parabolic_offset(prev: f32, center: f32, next: f32) -> f64 {
+    let denom = prev - 2.0 * center + next;
+    if denom.abs() < 1e-12 {
+        return 0.0;
+    }
+    (0.5 * (prev - next) / denom).clamp(-0.5, 0.5) as f64
 }
 
 pub fn place_notes(
     onsets: &[Onset],
     frames: &[NoveltyFrame],
-    bpm: u32,
-    phase_ms: u64,
+    bpm: f64,
+    phase_ms: f64,
     difficulty: Difficulty,
 ) -> Vec<Note> {
     let params = difficulty_params(difficulty);
-    let beat_ms = 60_000.0 / bpm as f64;
+    let beat_ms = 60_000.0 / bpm;
     let grid_ms = beat_ms / params.grid_div as f64;
     let hop_ms = if frames.len() >= 2 {
         frames[1].time_ms - frames[0].time_ms
@@ -413,7 +507,7 @@ pub fn place_notes(
         if !notes.is_empty() && onset.time_ms.saturating_sub(last_time) < effective_gap {
             continue;
         }
-        let quantized = quantize_phased(onset.time_ms, phase_ms, grid_ms);
+        let quantized = snap_to_grid(onset.time_ms, phase_ms, grid_ms);
         if !notes.is_empty() && quantized.saturating_sub(last_time) < effective_gap / 2 {
             continue;
         }
@@ -603,7 +697,7 @@ fn detect_hold(
     frames: &[NoveltyFrame],
     hop_ms: f64,
     beat_ms: f64,
-    phase_ms: u64,
+    phase_ms: f64,
     grid_ms: f64,
     quantized: u64,
 ) -> u64 {
@@ -651,13 +745,21 @@ fn sustain_ms(
     ((end - start_frame) as f64 * hop_ms) as u64
 }
 
-fn quantize_phased(time_ms: u64, phase_ms: u64, grid_ms: f64) -> u64 {
+fn quantize_phased(time_ms: u64, phase_ms: f64, grid_ms: f64) -> u64 {
     if grid_ms <= 0.0 {
         return time_ms;
     }
-    let rel = time_ms as i64 - phase_ms as i64;
-    let steps = (rel as f64 / grid_ms).round();
-    (phase_ms as i64 + (steps * grid_ms) as i64).max(0) as u64
+    let steps = ((time_ms as f64 - phase_ms) / grid_ms).round();
+    (phase_ms + steps * grid_ms).round().max(0.0) as u64
+}
+
+fn snap_to_grid(time_ms: u64, phase_ms: f64, grid_ms: f64) -> u64 {
+    let snapped = quantize_phased(time_ms, phase_ms, grid_ms);
+    if snapped.abs_diff(time_ms) as f64 <= SNAP_TOLERANCE_MS {
+        snapped
+    } else {
+        time_ms
+    }
 }
 
 fn hash_u64(mut x: u64) -> u64 {

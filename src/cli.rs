@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::achievements::{AchievementId, AchievementStore};
 use crate::audio::{analyzer, import, metadata};
+use crate::beatmap::generator;
 use crate::beatmap::types::{Beatmap, Difficulty, SongMeta};
-use crate::beatmap::{generator, loader};
 use crate::config::Config;
 use crate::game::practice::{self, PracticeSettings};
 use crate::play_history::{self, PlayHistory};
@@ -542,7 +542,7 @@ pub fn list() -> Result<()> {
         let short_name: String = display_name.chars().take(17).collect();
         let short_slug: String = e.slug.chars().take(22).collect();
         println!(
-            "{:<3}{:<24}{:<18}{:<6}{:<7}",
+            "{:<3}{:<24}{:<18}{:<6.0}{:<7}",
             idx + 1,
             short_slug,
             short_name,
@@ -581,7 +581,7 @@ pub fn song(slug: &str) -> Result<()> {
     println!("{}", display);
     println!("{}", "─".repeat(display.chars().count().max(40)));
     println!("  slug:     {}", slug);
-    println!("  bpm:      {}", bpm);
+    println!("  bpm:      {:.1}", bpm);
     println!(
         "  length:   {}:{:02}",
         duration_ms / 60_000,
@@ -592,13 +592,19 @@ pub fn song(slug: &str) -> Result<()> {
     println!("Note counts:");
     for d in Difficulty::all() {
         let p = dir.join(d.filename());
-        let count = std::fs::read_to_string(&p)
+        let Some(bm) = std::fs::read_to_string(&p)
             .ok()
             .and_then(|s| serde_json::from_str::<Beatmap>(&s).ok())
-            .map(|bm| bm.notes.len())
-            .unwrap_or(0);
-        if count > 0 {
-            println!("  {:<8}{:>5} notes", d.to_string().to_uppercase(), count);
+        else {
+            continue;
+        };
+        if !bm.notes.is_empty() {
+            println!(
+                "  {:<8}{:>5} notes   ★ {:.1}",
+                d.to_string().to_uppercase(),
+                bm.notes.len(),
+                crate::beatmap::rating::star_rating(&bm.notes)
+            );
         }
     }
 
@@ -835,7 +841,7 @@ struct SongSummary {
     slug: String,
     title: String,
     artist: String,
-    bpm: u32,
+    bpm: f64,
     duration_ms: u64,
 }
 
@@ -873,7 +879,7 @@ fn read_title_artist(dir: &Path) -> Option<(String, String)> {
     ))
 }
 
-fn read_bpm_duration(dir: &Path) -> (u32, u64) {
+fn read_bpm_duration(dir: &Path) -> (f64, u64) {
     for d in Difficulty::all() {
         let p = dir.join(d.filename());
         if !p.exists() {
@@ -887,7 +893,7 @@ fn read_bpm_duration(dir: &Path) -> (u32, u64) {
         };
         return (bm.song.bpm, bm.song.duration_ms);
     }
-    (0, 0)
+    (0.0, 0)
 }
 
 fn format_best_scores(scores: &ScoreStore, slug: &str) -> String {
@@ -919,14 +925,11 @@ fn regenerate_for_dir(dir: &Path, audio_path: &Path, title: &str, artist: &str) 
         title: title.to_string(),
         artist: artist.to_string(),
         audio_file: audio_filename,
-        bpm: 120,
+        bpm: 120.0,
+        beat_offset_ms: 0.0,
         duration_ms,
     };
 
-    let beatmaps = generator::generate_all_beatmaps(&samples, sample_rate, meta);
-    for bm in &beatmaps {
-        let path = dir.join(bm.difficulty.filename());
-        let _ = loader::save(bm, &path);
-    }
+    generator::write_all_beatmaps(dir, &samples, sample_rate, meta);
     Ok(())
 }

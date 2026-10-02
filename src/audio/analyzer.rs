@@ -113,13 +113,42 @@ impl SpectrumAnalyzer {
     }
 }
 
+pub struct DecodedAudio {
+    pub mono: Vec<f32>,
+    pub interleaved: Vec<i16>,
+    pub channels: u16,
+    pub sample_rate: u32,
+}
+
 pub fn decode_audio(path: &std::path::Path) -> anyhow::Result<(Vec<f32>, u32)> {
+    let decoded = decode(path, false, None)?;
+    Ok((decoded.mono, decoded.sample_rate))
+}
+
+pub fn decode_for_playback(path: &std::path::Path) -> anyhow::Result<DecodedAudio> {
+    decode(path, true, None)
+}
+
+pub fn decode_excerpt(
+    path: &std::path::Path,
+    start_ms: u64,
+    length_ms: u64,
+) -> anyhow::Result<DecodedAudio> {
+    decode(path, true, Some((start_ms, length_ms)))
+}
+
+fn decode(
+    path: &std::path::Path,
+    keep_interleaved: bool,
+    excerpt: Option<(u64, u64)>,
+) -> anyhow::Result<DecodedAudio> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
+    use symphonia::core::units::Time;
 
     let file = std::fs::File::open(path)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -137,16 +166,39 @@ pub fn decode_audio(path: &std::path::Path) -> anyhow::Result<(Vec<f32>, u32)> {
     )?;
 
     let mut format = probed.format;
-    let track = format.default_track().unwrap();
+    let track = format
+        .default_track()
+        .ok_or_else(|| anyhow::anyhow!("no audio track"))?;
     let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
     let track_id = track.id;
 
     let mut decoder =
         symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
 
-    let mut all_samples = Vec::new();
+    let mut frame_limit = usize::MAX;
+    if let Some((start_ms, length_ms)) = excerpt {
+        if start_ms > 0 {
+            let time = Time::new(start_ms / 1000, (start_ms % 1000) as f64 / 1000.0);
+            let _ = format.seek(
+                SeekMode::Coarse,
+                SeekTo::Time {
+                    time,
+                    track_id: Some(track_id),
+                },
+            );
+            decoder.reset();
+        }
+        frame_limit = (length_ms as f64 / 1000.0 * sample_rate as f64) as usize;
+    }
 
-    loop {
+    let mut out = DecodedAudio {
+        mono: Vec::new(),
+        interleaved: Vec::new(),
+        channels: 1,
+        sample_rate,
+    };
+
+    while out.mono.len() < frame_limit {
         let packet = match format.next_packet() {
             Ok(p) => p,
             Err(_) => break,
@@ -163,21 +215,30 @@ pub fn decode_audio(path: &std::path::Path) -> anyhow::Result<(Vec<f32>, u32)> {
 
         let spec = *decoded.spec();
         let num_frames = decoded.frames();
+        let channels = spec.channels.count().max(1);
         let mut sample_buf = SampleBuffer::<f32>::new(num_frames as u64, spec);
         sample_buf.copy_interleaved_ref(decoded);
 
         let samples = sample_buf.samples();
-        let channels = spec.channels.count();
+        let take = (frame_limit - out.mono.len()).min(samples.len() / channels);
+        let samples = &samples[..take * channels];
+        out.channels = channels as u16;
 
+        if keep_interleaved {
+            out.interleaved.extend(
+                samples
+                    .iter()
+                    .map(|&v| (v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16),
+            );
+        }
         if channels == 1 {
-            all_samples.extend_from_slice(samples);
+            out.mono.extend_from_slice(samples);
         } else {
             for chunk in samples.chunks(channels) {
-                let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
-                all_samples.push(mono);
+                out.mono.push(chunk.iter().sum::<f32>() / channels as f32);
             }
         }
     }
 
-    Ok((all_samples, sample_rate))
+    Ok(out)
 }

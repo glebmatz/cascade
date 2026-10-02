@@ -1,22 +1,20 @@
 use crate::app::{Action, Screen};
+use crate::audio::player::AudioPlayer;
 use crate::config::Config;
 use crate::ui::chrome::{render_bottom_bar, render_top_bar};
 use ratatui::prelude::*;
-use rodio::{OutputStream, OutputStreamHandle, Sink, buffer::SamplesBuffer};
-use std::time::Instant;
 
 const BPM: u64 = 120;
 const BEAT_MS: u64 = 60_000 / BPM; // 500 ms
 const WARMUP_BEATS: u64 = 4;
 const MEASURE_BEATS: u64 = 16;
 const TOTAL_BEATS: u64 = WARMUP_BEATS + MEASURE_BEATS;
+const LEAD_IN_MS: u64 = BEAT_MS;
+const SAMPLE_RATE: u32 = 44_100;
 
 pub struct CalibrateScreen {
-    _stream: OutputStream,
-    _stream_handle: OutputStreamHandle,
-    sink: Sink,
-    start: Option<Instant>,
-    last_beat_played: i64,
+    player: AudioPlayer,
+    started: bool,
     hits: Vec<i64>, // signed diff in ms (press - expected_beat)
     config: Config,
     result: Option<i32>,
@@ -24,56 +22,50 @@ pub struct CalibrateScreen {
 
 impl CalibrateScreen {
     pub fn new(config: Config) -> anyhow::Result<Self> {
-        let (stream, stream_handle) = OutputStream::try_default()?;
-        let sink = Sink::try_new(&stream_handle)?;
+        let mut player = AudioPlayer::new()?;
+        player.load_samples(Self::metronome_track(), 1, SAMPLE_RATE)?;
+        player.set_volume(config.audio.volume as f32);
         Ok(Self {
-            _stream: stream,
-            _stream_handle: stream_handle,
-            sink,
-            start: None,
-            last_beat_played: -1,
+            player,
+            started: false,
             hits: Vec::new(),
             config,
             result: None,
         })
     }
 
-    fn click_samples() -> SamplesBuffer<f32> {
-        // 40 ms of 1 kHz sine, fast decay
-        let sr = 44_100u32;
-        let len = (sr as f32 * 0.04) as usize;
-        let mut samples = Vec::with_capacity(len);
-        for i in 0..len {
-            let t = i as f32 / sr as f32;
-            let env = (1.0 - i as f32 / len as f32).powf(1.5);
-            let s = (2.0 * std::f32::consts::PI * 1000.0 * t).sin() * env * 0.4;
-            samples.push(s);
+    fn metronome_track() -> Vec<i16> {
+        let ms_to_samples = |ms: u64| (ms * SAMPLE_RATE as u64 / 1000) as usize;
+        let mut samples = vec![0i16; ms_to_samples(LEAD_IN_MS + (TOTAL_BEATS + 1) * BEAT_MS)];
+        let click_len = ms_to_samples(40);
+        for beat in 0..TOTAL_BEATS {
+            let start = ms_to_samples(LEAD_IN_MS + beat * BEAT_MS);
+            for i in 0..click_len {
+                let t = i as f32 / SAMPLE_RATE as f32;
+                let env = (1.0 - i as f32 / click_len as f32).powf(1.5);
+                let s = (2.0 * std::f32::consts::PI * 1000.0 * t).sin() * env * 0.4;
+                samples[start + i] = (s * i16::MAX as f32) as i16;
+            }
         }
-        SamplesBuffer::new(1, sr, samples)
+        samples
+    }
+
+    fn track_ms(&self) -> i64 {
+        self.player.position_ms() as i64 - LEAD_IN_MS as i64
     }
 
     pub fn start(&mut self) {
-        self.start = Some(Instant::now());
-        self.last_beat_played = -1;
+        self.player.play();
+        self.started = true;
         self.hits.clear();
         self.result = None;
     }
 
     pub fn update(&mut self) {
-        let Some(start) = self.start else { return };
-        if self.result.is_some() {
+        if !self.started || self.result.is_some() {
             return;
         }
-
-        let elapsed_ms = start.elapsed().as_millis() as i64;
-        let beat_idx = elapsed_ms / BEAT_MS as i64;
-
-        if beat_idx > self.last_beat_played && beat_idx < TOTAL_BEATS as i64 {
-            self.sink.append(Self::click_samples());
-            self.last_beat_played = beat_idx;
-        }
-
-        if beat_idx >= TOTAL_BEATS as i64 {
+        if self.track_ms() >= (TOTAL_BEATS * BEAT_MS) as i64 {
             self.finish();
         }
     }
@@ -109,16 +101,15 @@ impl CalibrateScreen {
             Action::Back | Action::Pause | Action::Quit => Some(Action::Navigate(Screen::Settings)),
             Action::MenuSelect if self.result.is_some() => Some(Action::Navigate(Screen::Settings)),
             Action::GameKey(_) | Action::GameKeyRelease(_) => {
-                let Some(start) = self.start else { return None };
-                if self.result.is_some() {
+                if !self.started || self.result.is_some() {
                     return None;
                 }
                 if matches!(action, Action::GameKeyRelease(_)) {
                     return None;
                 }
 
-                let elapsed_ms = start.elapsed().as_millis() as i64;
-                let beat_idx = elapsed_ms / BEAT_MS as i64;
+                let elapsed_ms = self.track_ms();
+                let beat_idx = (elapsed_ms + BEAT_MS as i64 / 2).div_euclid(BEAT_MS as i64);
                 // Ignore warmup beats
                 if beat_idx < WARMUP_BEATS as i64 {
                     return None;
@@ -169,11 +160,8 @@ impl CalibrateScreen {
             Style::default().fg(Color::White).bold(),
         );
 
-        let elapsed_ms = self
-            .start
-            .map(|s| s.elapsed().as_millis() as i64)
-            .unwrap_or(0);
-        let beat_idx = elapsed_ms / BEAT_MS as i64;
+        let elapsed_ms = self.track_ms();
+        let beat_idx = elapsed_ms.div_euclid(BEAT_MS as i64);
 
         if let Some(offset) = self.result {
             let lines = [
@@ -219,7 +207,7 @@ impl CalibrateScreen {
         );
 
         // Beat indicator: fills on downbeat, fades
-        let ms_in_beat = (elapsed_ms % BEAT_MS as i64).max(0);
+        let ms_in_beat = elapsed_ms.rem_euclid(BEAT_MS as i64);
         let beat_frac = 1.0 - (ms_in_beat as f64 / BEAT_MS as f64);
         let width = 20u16.min(area.width / 3);
         let bar_x = cx.saturating_sub(width / 2);

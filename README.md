@@ -56,15 +56,17 @@ hold-note release detection.
 ## Features
 
 - **Works with your library** — import any audio file, or a whole folder recursively; ID3/Vorbis tags are read automatically
-- **Smart beatmaps** — spectral-flux onset detection, autocorrelated BPM, downbeat phase alignment, per-difficulty density, pitch-contour-aware lane placement for melodic onsets
+- **Smart beatmaps** — spectral-flux onset detection with sample-window-corrected timing, fractional BPM with half/double-tempo protection, onset-aligned beat grid, per-difficulty density, pitch-contour-aware lane placement for melodic onsets
 - **Chords + holds + slides** — up to 3-note chords, sustained holds, and slide notes that transition between lanes (Hard / Expert)
-- **Rich visuals** — half-block rendering, particle physics, starfield background, vignette, live spectrum bars, beat-synced receptor glow, chromatic-aberration flash on Perfect hits, waveform song-progress preview in the HUD
+- **Rich visuals** — half-block rendering with sub-pixel note motion, particle physics, a starfield that warps into streaks when the song gets loud, vignette, live spectrum bars, beat-synced receptor glow, chromatic-aberration flash on Perfect hits, a live early/late hit-error meter, waveform song-progress preview in the HUD, tear-free synchronized terminal output
+- **Song preview** — song select plays the hottest 20 seconds of the highlighted track, with a tiny live level meter next to it
+- **Star ratings** — every difficulty gets a ★ rating from peak note density, jacks, holds and slides, shown in song select and `cascade song`
 - **Synthesized hit feedback** — every judgement has its own click; menu navigation has its own sound
 - **Modifiers** — Hidden, Flashlight, Sudden Death, Perfect Only. Each combo gets its own best-score slot
 - **Drain mode** — optional survival variant where health bleeds over time; only Perfects meaningfully restore it
 - **Practice mode** — loop any section at any speed from 0.25× to 2.0×, perfect for drilling that one run you keep bailing on
 - **Replay ghosts** — every scored run records timing events; race an old run with `cascade replay <run-id>`
-- **Results breakdown** — see early/late bias, roughest section, and miss-heavy lane immediately after a run
+- **Results breakdown** — timing-spread histogram, accuracy-over-the-song strip, early/late bias, roughest section, and miss-heavy lane immediately after a run
 - **Song packs** — bundle multiple `.cscd` share packages into one `.cpack`
 - **Achievements** — 12 unlockables for combos, full clears, mod runs
 - **Stats dashboard** — aggregate play history with a 30-day accuracy sparkline and activity heatmap, both in the UI and via `cascade stats`
@@ -163,7 +165,13 @@ Main menu → Settings → Calibrate Audio
 
 Tap <kbd>Space</kbd> on the beat for ~16 beats. The game takes the IQR-trimmed
 median of your timing errors and stores it as `offset_ms`. Takes 15 seconds
-once, and every hit after that will feel honest.
+once, and every hit after that will feel honest. The offset shifts both
+judging and the note highway, so notes reach the hit line exactly when you
+hear them.
+
+Upgrading from 0.9 or older? Recalibrate once: input is now timestamped the
+moment it arrives instead of once per frame, and the calibrator measures
+against the same audio clock as gameplay.
 
 ## Controls
 
@@ -231,7 +239,6 @@ volume = 0.8
 offset_ms = 0             # set by calibrator
 
 [display]
-fps = 60
 theme = "classic"         # classic / neon / mono / sunset / ocean
 ```
 
@@ -412,30 +419,40 @@ cascade replay 662f0f00-0004
 
 The ghost is drawn as small cross markers on the highway using the prior run's
 actual input timestamps, so early and late hits drift around the live notes
-instead of snapping to the beatmap. The Results screen also summarizes timing
-bias, early/late counts, the lane with the most misses, and the roughest
+instead of snapping to the beatmap. The Results screen also draws a
+timing-spread histogram (±120 ms, colored by judgement window) and a
+per-section accuracy strip across the whole song, alongside timing bias,
+early/late counts, the lane with the most misses, and the roughest
 15-second window.
 
 ## How the beatmap generator works
 
 1. **Novelty**: short-time FFT with Hann window (2048 / 512 hop), per-band
    log-magnitude with running-max whitening, half-wave-rectified spectral
-   flux summed across 8 logarithmic bands.
+   flux summed across 8 logarithmic bands. Each frame is timestamped at the
+   hop where new audio entered the window, not at the window start, so
+   onsets land on the sound instead of ~40 ms ahead of it.
 2. **Peak picking**: 95th-percentile normalization; local max within ±50 ms;
    must exceed `median + 1.5 × MAD` over a ±200 ms window.
-3. **BPM**: autocorrelation of the novelty signal in the 60 – 200 BPM
-   window, biased toward 120 BPM to avoid half/double confusion.
-4. **Downbeat phase**: comb cross-correlation at the estimated BPM with ±1
-   frame neighbourhood so the grid snaps to the nearest peak, not a hop
-   boundary.
-5. **Notes**: quantized to the phase-aligned grid, filtered per-difficulty
+3. **BPM**: autocorrelation of the smoothed novelty signal in the 60 – 200
+   BPM window with a log-tempo prior centred at 130 BPM (keeps 140 – 180
+   BPM tracks from halving), then refined to a fractional value with
+   parabolic interpolation on a peak at 2 – 8× the beat lag.
+4. **Beat phase**: comb cross-correlation at the estimated BPM, then nudged
+   by the median offset of nearby onsets so the grid sits on the music.
+5. **Notes**: snapped to the phase-aligned grid only when an onset is
+   already within 12 ms of a grid line (otherwise the onset time is kept,
+   so a slightly-off grid can't drag notes off the beat), filtered per-difficulty
    by strength; lane chosen from the dominant band with repeat-avoidance
    hysteresis; per-peak secondary bands (≥50 % of top flux) can produce
    2- or 3-note chords on harder difficulties.
 6. **Holds**: if the dominant band's whitened energy stays ≥75 % of its
    peak level for ≥1.5 beats, the note becomes a hold of that duration.
 
-No labeled training data, no downloads, all deterministic.
+No labeled training data, no downloads, all deterministic. Timing is guarded
+by synthetic click-track and kick/hat regression tests in
+`tests/generator_timing_test.rs`. Beatmaps from older generator versions are
+regenerated automatically the first time a song is played.
 
 ## Contributing
 

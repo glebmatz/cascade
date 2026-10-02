@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-10-02
+
+### Added
+
+- **Song preview** — song select plays the densest 20-second section of the
+  highlighted song (fade in/out, seamless loop) after a short debounce, and
+  the selection accent turns into a live three-band level meter.
+- **Star ratings** — each difficulty gets a ★ rating from peak weighted note
+  density (jacks, holds and slides weigh more). Shown in song select and
+  `cascade song`. Best scores in song select now use `♛` to avoid confusion.
+- **Hit-error meter** under the hit zone: the last 3 seconds of hits as ticks
+  on an early/late scale with Perfect/Great/Good zones.
+- **Results graphs** — a ±120 ms timing-spread histogram and a per-section
+  accuracy strip across the song replace the plain timing text lines.
+- **Starfield warp** — stars speed up and streak with the song's loudness
+  envelope, so choruses feel faster than verses.
+
+### Fixed
+
+- **Notes were ~40 ms early.** Onset times were stamped at the start of the
+  FFT window instead of where new audio entered it, so a player hitting
+  exactly on the music sat on the Perfect/Great boundary. Beatmaps from older
+  versions are regenerated automatically on first play (`version: 2`).
+- **Tempo halving** — 140 – 180 BPM tracks were detected at half tempo
+  (e.g. 174 → 88). BPM is now fractional and octave-protected; the beat grid
+  is aligned to the onsets themselves.
+- **Grid drift** — notes are only snapped to the beat grid when already within
+  12 ms of it, so an imperfect grid can no longer pull notes off the beat.
+- **Input latency jitter** — key presses were processed once per frame (up to
+  16.7 ms late). The loop now wakes on input and judges it immediately.
+- **Stepping audio clock** — `rodio`'s position advances in device-buffer
+  bursts; it is now interpolated with a monotonic clock, giving smooth note
+  motion and steadier judging.
+- **Audio offset only applied to judging** — the calibrated offset now shifts
+  the highway, ghosts and beat glow too, and note lookup uses the corrected
+  time (large offsets such as Bluetooth headphones could make presses miss
+  the note entirely).
+- **Calibration clock mismatch** — the calibrator scheduled clicks per frame
+  on a wall clock; it now plays a pre-rendered metronome and measures against
+  the same audio clock as gameplay. Recalibrate once after upgrading.
+- **Songs played in mono** — playback now keeps the original stereo image
+  (16-bit interleaved, same memory as before).
+- **Note judder** — notes and ghost markers are drawn with sub-pixel vertical
+  coverage instead of snapping to half-cells.
+- **Screen tearing** — frames are wrapped in synchronized-output escapes.
+
+### Removed
+
+- `display.fps` — it was never read. Existing configs that contain it still
+  load.
+
 ## [0.9.0] — 2026-05-20
 
 ### Added
@@ -262,7 +313,8 @@ First public release.
   `cascade regen`, `cascade help`.
 - **Dual MIT / Apache-2.0 licensing**.
 
-[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/glebmatz/cascade/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/glebmatz/cascade/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/glebmatz/cascade/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/glebmatz/cascade/releases/tag/v0.8.0
 [0.7.0]: https://github.com/glebmatz/cascade/releases/tag/v0.7.0
